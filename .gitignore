@@ -1,0 +1,12 @@
+1712.01815v1.pdf
+__pycache__/
+.pytest_cache/
+checkpoints/
+chess/
+venv/
+data/
+engine/build/
+models/
+third_party/
+chessbot.log
+wandb/

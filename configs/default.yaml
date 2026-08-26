@@ -1,0 +1,89 @@
+# Central configuration - single source of truth for engine + trainer + orchestrator
+
+run:
+  name: chessbot-v1
+  data_dir: data/selfplay
+  checkpoint_dir: checkpoints
+  model_dir: models
+
+net:
+  blocks: 6          # start small, scale up as Elo grows
+  channels: 96
+
+selfplay:
+  # Search quality is THE bottleneck: at 96/512 visits the net plays accident
+  # chess (92%+ draws, value head learns "nothing matters"). These budgets put
+  # self-play ~2.4x deeper so games get decided by play, giving the WDL head
+  # real structure to learn. games_per_phase cut to keep iterations ~4h.
+  games_per_phase: 1200
+  threads: 12
+  games_per_worker: 6
+  batch_size: 512
+  fast_visits: 256
+  full_visits: 1024
+  fast_prob: 0.70
+  leaves_per_round: 32          # more in-flight leaves per game -> fuller GPU batches
+  temperature_plies: 60
+  prior_plies: 40               # chaos window: ~40 random-ish plies create the imbalances
+                                # that contempt + material-seed then convert (validated: 16.7%
+                                # decisive vs 5% at prior 16/temp 30, Exp-G)
+  max_plies: 300                # long enough for the material adjudication to matter
+  adjudicate_material_pawns: 3.0  # lowered from 4.0: conversions cross the decisive line sooner
+  value_material_alpha: 0.3     # cold-start: material head steers the search until WDL
+                                # discriminates (probe ev(queen-up) > ~0.7 -> 0.15 -> 0)
+  use_twofold_draw: true        # BACK ON: with it off the search was BLIND to repetitions -
+                                # games drifted into threefolds invisibly. Now a repeat is a
+                                # visible terminal scored 0.0 (maximally unattractive).
+  contempt: 0.40                # search-side draw value < 0.5: both players avoid sterile
+                                # draws; training labels stay honest 0.5. Raise toward 0.5
+                                # as decisive rate climbs.
+  resign_enabled: true          # ON: value net discriminates now (v_acc ~0.95). Breaks the
+                                # "losing side shuffles to threefold" pattern -> decisive labels
+  resign_threshold: -0.95
+  resign_consecutive: 2
+  resign_continue_frac: 0.10    # keep playing 10% of resignable games (false-positive guard)
+  resign_min_ply: 30
+  shard_games: 24
+  seed: 1
+
+train:
+  steps_per_phase: 2400         # 1200 was underfitting: ~1.5 epochs/iteration while
+                                # self-play data outpaced learning (iter 0-6 stall)
+  batch_size: 512
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  warmup_steps: 100
+  min_positions_to_start: 25000
+  w_policy: 1.0
+  w_wdl: 1.0
+  w_material: 0.1
+  wdl_draw_weight: 0.25         # down-weight draw-result positions in the WDL loss
+  wdl_shape_beta: 0.5           # cold-start value shaping: every position teaches
+                                # 'material -> winning chances' (dense signal, exempt
+                                # from draw weighting); fades to pure game-result
+  wdl_shape_fade_end_step: 65000  # targets by this step (set ~current_step + 40k)
+  wdl_shape_fade_span_steps: 40000
+  checkpoint_every_steps: 400
+  keep_last_checkpoints: 3
+  replay_window: 1500000        # ~10 iterations of replay: fresher data + cache fits RAM
+  cache_shards: 320             # ~1.3GB RAM; ~70% hit rate at the 1.5M window (was 256/3M
+                                # = 29% -> gzip thrash made training 20x slower)
+
+gate:
+  enabled: true
+  measurement_only: true   # AlphaZero-faithful (paper p.3): single continually-updated
+                           # net - no promotion gate, self-play always uses the freshest
+                           # export; anchor match is measurement only
+  games: 160          # enough that +/-1 se (~7 Elo) can't flunk/promote real changes
+  visits: 160
+  batch_size: 256
+  threads: 8
+  games_per_worker: 4
+  min_score: 0.55     # (unused in measurement_only mode)
+  force_promote_after: 4
+  anchor_model: models/anchor.onnx  # frozen random-init net; NEVER overwritten
+
+wandb:
+  enabled: true
+  project: chess-bot
+  entity: null

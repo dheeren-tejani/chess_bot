@@ -1,0 +1,51 @@
+# Smoke-test config: tiny numbers to validate the full loop quickly
+run:
+  name: chessbot-smoke
+  data_dir: data/loop
+  checkpoint_dir: checkpoints_loop
+  model_dir: models_loop
+
+net:
+  blocks: 4
+  channels: 64
+
+selfplay:
+  games_per_phase: 8
+  threads: 5
+  games_per_worker: 2
+  batch_size: 128
+  fast_visits: 32
+  full_visits: 64
+  fast_prob: 0.75
+  leaves_per_round: 16
+  temperature_plies: 6
+  max_plies: 40
+  adjudicate_material_pawns: 4.0
+  use_twofold_draw: true
+  shard_games: 4
+  seed: 7
+
+train:
+  steps_per_phase: 60
+  batch_size: 128
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  warmup_steps: 20
+  min_positions_to_start: 200
+  w_policy: 1.0
+  w_wdl: 1.0
+  w_material: 0.1
+  checkpoint_every_steps: 30
+  keep_last_checkpoints: 2
+
+gate:
+  enabled: true
+  games: 4
+  visits: 48
+  batch_size: 64
+  min_score: 0.55
+  force_promote_after: 2
+  anchor_model: models_loop/anchor.onnx
+
+wandb:
+  enabled: false
