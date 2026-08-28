@@ -160,7 +160,7 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
 // Parallel engine-vs-engine match. Returns JSON summary string.
 std::string run_match(const std::string& model_a, const std::string& model_b,
                       int games, int visits, int batch_size, bool prefer_gpu,
-                      int threads = 4, int games_per_worker = 3);
+                      int threads = 4, int games_per_worker = 3, const std::string& pgn_out = "");
 
 // Quick evaluator throughput benchmark.
 int run_bench(const std::string& model_path, int seconds, int batch_size, bool prefer_gpu);

@@ -342,9 +342,13 @@ class Orchestrator:
         print("[train]", json.dumps(summary))
         return "ok" if summary.get("status") == "ok" else "insufficient"
 
-    def _run_match(self, model_a: Path, model_b: Path) -> dict | None:
+    def _run_match(self, model_a: Path, model_b: Path, tag: str = "") -> dict | None:
         """Play a gated match; returns the engine's match JSON or None."""
         c = self.cfg.gate
+        pgn_dir = self.root / "match_pgns"
+        pgn_dir.mkdir(parents=True, exist_ok=True)
+        suffix = f"_{tag}" if tag else ""
+        pgn_file = pgn_dir / f"iter_{self.state['iterations']:04d}{suffix}.pgn"
 
         def match_line(stream, line):
             if '"type":"matchprog"' in line:
@@ -363,6 +367,7 @@ class Orchestrator:
             "--batch", str(c.batch_size),
             "--threads", str(c.threads),
             "--games-per-worker", str(c.games_per_worker),
+            "--pgn", str(pgn_file),
         ], on_line=match_line)
         if rc != 0:
             print(f"[gate] match exited {rc}: {model_a.name} vs {model_b.name}")
@@ -378,18 +383,33 @@ class Orchestrator:
     @staticmethod
     def _match_metrics(res: dict | None) -> dict:
         if not res:
-            return {"score": None, "elo": None, "se": None}
-        return {"score": res.get("score", 0.5), "elo": round(res.get("elo_diff", 0.0), 1),
-                "se": round(res.get("elo_se", 0.0), 1)}
+            return {"score": None, "elo": None, "se": None, "wins": 0, "draws": 0, "losses": 0}
+        return {
+            "score": res.get("score", 0.5),
+            "elo": round(res.get("elo_diff", 0.0), 1),
+            "se": round(res.get("elo_se", 0.0), 1),
+            "wins": res.get("wins", 0),
+            "draws": res.get("draws", 0),
+            "losses": res.get("losses", 0),
+        }
 
     def phase_gate(self):
         if not self.cfg.gate.enabled:
             print("[gate] disabled -> promoting candidate unconditionally")
             if self.candidate.exists():
                 self.candidate.replace(self.champion)
-            self.last_gate = {"gate_score": None, "gate_elo": None, "gate_se": None,
-                              "anchor_score": None, "anchor_elo": None, "anchor_se": None,
-                              "champion_anchor_elo": None}
+            self.last_gate = {
+                "gate_score": None,
+                "gate_elo": None,
+                "gate_se": None,
+                "anchor_score": res_a["score"],
+                "anchor_elo": res_a["elo"],
+                "anchor_se": res_a["se"],
+                "anchor_wins": res_a["wins"],
+                "anchor_draws": res_a["draws"],
+                "anchor_losses": res_a["losses"],
+                "champion_anchor_elo": res_a["elo"],
+            }
             return
 
         c = self.cfg.gate
@@ -428,7 +448,7 @@ class Orchestrator:
             print(f"[gate] measurement-only: candidate vs anchor ({anchor.name}), "
                   f"{c.games} games")
             t0 = time.time()
-            res_a = self._match_metrics(self._run_match(self.candidate, anchor))
+            res_a = self._match_metrics(self._run_match(self.candidate, anchor, tag="anchor"))
             print(f"[gate] match done in {(time.time()-t0)/60:.1f} min")
             self.state.setdefault("elo_history", []).append({
                 "iter": self.state["iterations"],
@@ -449,9 +469,9 @@ class Orchestrator:
         print(f"[gate] candidate vs champion: {c.games} games @ {c.visits} visits "
               f"({c.threads}x{c.games_per_worker} parallel)")
         t0 = time.time()
-        res_c = self._match_metrics(self._run_match(self.candidate, self.champion))
+        res_c = self._match_metrics(self._run_match(self.candidate, self.champion, tag="champ"))
         print(f"[gate] candidate vs anchor ({anchor.name}): {c.games} games")
-        res_a = self._match_metrics(self._run_match(self.candidate, anchor))
+        res_a = self._match_metrics(self._run_match(self.candidate, anchor, tag="anchor"))
         print(f"[gate] matches done in {(time.time()-t0)/60:.1f} min")
 
         champ_anchor = self.state.get("champion_anchor") or {"score": 0.0, "elo": 0.0}

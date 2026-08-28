@@ -6,6 +6,7 @@
 #include "policy_map.h"
 #include "encoder.h"
 #include "selfplay.h"
+#include "uci.h"
 
 using namespace chess;
 
@@ -92,8 +93,9 @@ int main(int argc, char** argv) {
                 "           [--resign-threshold Q] [--resign-min-ply N]\n"
                 "           [--resign-consecutive N] [--resign-continue F]\n"
                 "  match --model-a A --model-b B [--games N] [--visits V] [--batch B]\n"
-                "        [--threads T] [--games-per-worker G] [--cpu]\n"
-                "  bench --model M [--seconds S] [--batch B] [--cpu]\n");
+                "        [--threads T] [--games-per-worker G] [--pgn FILE] [--cpu]\n"
+                "  bench --model M [--seconds S] [--batch B] [--cpu]\n"
+                "  uci --model M [--visits N] [--cpu]\n");
         return 2;
     }
 
@@ -151,7 +153,7 @@ int main(int argc, char** argv) {
     }
 
     if (!strcmp(argv[1], "match")) {
-        std::string a, b;
+        std::string a, b, pgn_path;
         int games = 60, visits = 320, batch = 128, threads = 4, gpw = 3;
         bool cpu = false;
         for (int i = 2; i < argc; ++i) {
@@ -164,10 +166,11 @@ int main(int argc, char** argv) {
             else if (!strcmp(argv[i], "--batch")) batch = nexti();
             else if (!strcmp(argv[i], "--threads")) threads = nexti();
             else if (!strcmp(argv[i], "--games-per-worker")) gpw = nexti();
+            else if (!strcmp(argv[i], "--pgn")) pgn_path = nexts();
             else if (!strcmp(argv[i], "--cpu")) cpu = true;
         }
         if (a.empty() || b.empty()) { fprintf(stderr, "--model-a/--model-b required\n"); return 2; }
-        printf("%s\n", run_match(a, b, games, visits, batch, !cpu, threads, gpw).c_str());
+        printf("%s\n", run_match(a, b, games, visits, batch, !cpu, threads, gpw, pgn_path).c_str());
         return 0;
     }
 
@@ -186,6 +189,22 @@ int main(int argc, char** argv) {
         }
         if (model.empty()) { fprintf(stderr, "--model required\n"); return 2; }
         return run_bench(model, seconds, batch, !cpu);
+    }
+
+    if (!strcmp(argv[1], "uci")) {
+        std::string model;
+        int visits = 800;
+        bool cpu = false;
+        for (int i = 2; i < argc; ++i) {
+            std::string k = argv[i];
+            auto nexti = [&]() { return std::stoi(argv[++i]); };
+            auto nexts = [&]() { return std::string(argv[++i]); };
+            if (k == "--model") model = nexts();
+            else if (k == "--visits") visits = nexti();
+            else if (k == "--cpu") cpu = true;
+        }
+        if (model.empty()) { fprintf(stderr, "--model required\n"); return 2; }
+        return run_uci(model, visits, !cpu);
     }
 
     fprintf(stderr, "unknown command %s\n", argv[1]);

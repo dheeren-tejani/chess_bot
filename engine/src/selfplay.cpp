@@ -7,6 +7,7 @@
 #include <memory>
 #include <algorithm>
 #include <random>
+#include <fstream>
 
 #include <zlib.h>
 #include <map>
@@ -85,16 +86,19 @@ void EvalBatcher::feeder_loop() {
         double e0 = std::exp(wrow[0] - wmax), e1 = std::exp(wrow[1] - wmax),
                e2 = std::exp(wrow[2] - wmax);
         double es = e0 + e1 + e2;
-        // ev with draws valued at cfg_.contempt instead of 0.5:
-        //   ev = pW*1 + pD*contempt + pL*0
+        
+        // 1. Calculate base in [0, 1] with contempt
         double base = (e0 + static_cast<double>(contempt_) * e1) / es;
+
+        // 2. Map to the engine's [-1, 1] scale
+        base = 2.0 * base - 1.0;
+
+        // 3. Blend material heuristic if enabled, clamping to valid bounds
         if (value_mat_alpha_ != 0.f) {
-            // cold-start aid: blend the (densely supervised) material head into
-            // the search value so games get decided by play, not accidents
             double m = static_cast<double>(mat[static_cast<size_t>(row)]);
             base += value_mat_alpha_ * (m / 8.0);
         }
-        t.value = static_cast<float>(base);
+        t.value = static_cast<float>(std::max(-1.0, std::min(1.0, base)));
     };
 
     for (;;) {
@@ -639,7 +643,7 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
 // ---------------------------------------------------------------------------
 std::string run_match(const std::string& model_a, const std::string& model_b,
                       int games, int visits, int batch_size, bool prefer_gpu,
-                      int threads, int games_per_worker) {
+                      int threads, int games_per_worker, const std::string& pgn_out) {
     attacks::init();
     MCTSConfig mc;
     mc.root_dirichlet = false;
@@ -650,6 +654,8 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
         bool a_is_white = true;
         int ply = 0;
         int result = -1;          // 0 white, 1 draw, 2 black ; -1 ongoing
+        int game_id = 0;
+        std::vector<std::string> moves;
         size_t inflight = 0;
         bool move_ready = false;
         bool finished = false;
@@ -671,6 +677,13 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
     std::atomic<int> finished_games{0};
     std::atomic<int> aw{0}, ad{0}, al{0};
 
+    std::mutex pgn_mu;
+    if (!pgn_out.empty()) {
+        std::ofstream init_file(pgn_out, std::ios::trunc);   // truncate once, before any worker starts
+        if (!init_file.is_open())
+            fprintf(stderr, "[warn] could not open pgn file %s for writing\n", pgn_out.c_str());
+    }
+
     batch_a.start();
     batch_b.start();
 
@@ -689,6 +702,8 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
                 g.a_is_white = (gid % 2 == 0);
                 g.ply = 0;
                 g.result = -1;
+                g.game_id = gid;
+                g.moves.clear();
                 g.inflight = 0;
                 g.move_ready = false;
                 g.finished = false;
@@ -731,6 +746,17 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
                 if (seen >= 3) { g.result = 1; return true; }
 
                 Search::Choice ch = s.pick_move(rng, g.ply);
+
+                // Record move in UCI notation (e.g. "e2e4", "e7e8q")
+                Move m = unpack_move(ch.move);
+                auto sqname = [](int sq) {
+                    char buf[3] = {static_cast<char>('a' + file_of(sq)), static_cast<char>('1' + rank_of(sq)), 0};
+                    return std::string(buf);
+                };
+                std::string uci = sqname(m.from) + sqname(m.to);
+                if (m.promo >= 0) uci += "?nbrq"[m.promo];
+                g.moves.push_back(uci);
+
                 s.apply_root_move(ch.move, ch.child_node);
                 ++g.ply;
                 return false;
@@ -771,6 +797,29 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
                             else if (pts == 0.5) ad.fetch_add(1);
                             else al.fetch_add(1);
                             g.finished = true;
+
+                            if (!pgn_out.empty()) {
+                                std::string white_name = g.a_is_white ? model_a : model_b;
+                                std::string black_name = g.a_is_white ? model_b : model_a;
+                                std::string res_tag = (g.result == 0) ? "1-0"
+                                                     : (g.result == 1) ? "1/2-1/2" : "0-1";
+                            
+                                std::string game_text;
+                                game_text += "[Event \"Engine Match\"]\n";
+                                game_text += "[Round \"" + std::to_string(g.game_id + 1) + "\"]\n";
+                                game_text += "[White \"" + white_name + "\"]\n";
+                                game_text += "[Black \"" + black_name + "\"]\n";
+                                game_text += "[Result \"" + res_tag + "\"]\n\n";
+                                for (size_t i = 0; i < g.moves.size(); ++i) {
+                                    if (i % 2 == 0) game_text += std::to_string(i / 2 + 1) + ". ";
+                                    game_text += g.moves[i] + " ";
+                                }
+                                game_text += res_tag + "\n\n";
+                            
+                                std::lock_guard<std::mutex> lk(pgn_mu);
+                                std::ofstream f(pgn_out, std::ios::app);
+                                if (f.is_open()) f << game_text;
+                            }
                         }
                         continue;
                     }
@@ -822,11 +871,13 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
     int w = aw.load(), d = ad.load(), l = al.load();
     double score_a = w + 0.5 * d;
     double p = score_a / std::max(games, 1);
-    double elo = 0, se = 0;
-    if (p > 0 && p < 1) {
-        elo = -400.0 * std::log10(1.0 / p - 1.0);
-        se = 400.0 / std::log(10.0) * std::sqrt(p * (1 - p) / std::max(games, 1));
-    }
+    
+    // Continuity correction clamp: prevents log10(0) on sweeps (p=0 or p=1)
+    double p_clamped = std::max(0.5 / std::max(games, 1), 
+                                std::min(1.0 - 0.5 / std::max(games, 1), p));
+    double elo = -400.0 * std::log10(1.0 / p_clamped - 1.0);
+    double se = 400.0 / std::log(10.0) * std::sqrt(p_clamped * (1.0 - p_clamped) / std::max(games, 1));
+
     char buf[512];
     snprintf(buf, sizeof(buf),
              "{\"type\":\"match\",\"games\":%d,\"wins\":%d,\"draws\":%d,\"losses\":%d,"

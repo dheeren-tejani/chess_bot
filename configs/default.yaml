@@ -23,13 +23,13 @@ selfplay:
   full_visits: 1024
   fast_prob: 0.70
   leaves_per_round: 32          # more in-flight leaves per game -> fuller GPU batches
-  temperature_plies: 60
-  prior_plies: 40               # chaos window: ~40 random-ish plies create the imbalances
+  temperature_plies: 40
+  prior_plies: 20               # chaos window: ~40 random-ish plies create the imbalances
                                 # that contempt + material-seed then convert (validated: 16.7%
                                 # decisive vs 5% at prior 16/temp 30, Exp-G)
   max_plies: 300                # long enough for the material adjudication to matter
   adjudicate_material_pawns: 3.0  # lowered from 4.0: conversions cross the decisive line sooner
-  value_material_alpha: 0.3     # cold-start: material head steers the search until WDL
+  value_material_alpha: 0.15     # cold-start: material head steers the search until WDL
                                 # discriminates (probe ev(queen-up) > ~0.7 -> 0.15 -> 0)
   use_twofold_draw: true        # BACK ON: with it off the search was BLIND to repetitions -
                                 # games drifted into threefolds invisibly. Now a repeat is a
@@ -37,7 +37,7 @@ selfplay:
   contempt: 0.40                # search-side draw value < 0.5: both players avoid sterile
                                 # draws; training labels stay honest 0.5. Raise toward 0.5
                                 # as decisive rate climbs.
-  resign_enabled: true          # ON: value net discriminates now (v_acc ~0.95). Breaks the
+  resign_enabled: false          # ON: value net discriminates now (v_acc ~0.95). Breaks the
                                 # "losing side shuffles to threefold" pattern -> decisive labels
   resign_threshold: -0.95
   resign_consecutive: 2
@@ -57,7 +57,7 @@ train:
   w_policy: 1.0
   w_wdl: 1.0
   w_material: 0.1
-  wdl_draw_weight: 0.25         # down-weight draw-result positions in the WDL loss
+  wdl_draw_weight: 0.5         # down-weight draw-result positions in the WDL loss
   wdl_shape_beta: 0.5           # cold-start value shaping: every position teaches
                                 # 'material -> winning chances' (dense signal, exempt
                                 # from draw weighting); fades to pure game-result
@@ -74,7 +74,7 @@ gate:
   measurement_only: true   # AlphaZero-faithful (paper p.3): single continually-updated
                            # net - no promotion gate, self-play always uses the freshest
                            # export; anchor match is measurement only
-  games: 160          # enough that +/-1 se (~7 Elo) can't flunk/promote real changes
+  games: 160               # enough that +/-1 se (~7 Elo) can't flunk/promote real changes
   visits: 160
   batch_size: 256
   threads: 8

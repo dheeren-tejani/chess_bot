@@ -10,3 +10,4 @@ models/
 third_party/
 chessbot.log
 wandb/
+all_code/

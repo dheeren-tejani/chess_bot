@@ -20,6 +20,7 @@ add_executable(engine
     src/nn_client.cpp
     src/mcts.cpp
     src/selfplay.cpp
+    src/uci.cpp
 )
 
 target_compile_options(engine PRIVATE -O3 -march=native -Wall -Wextra -funroll-loops)
