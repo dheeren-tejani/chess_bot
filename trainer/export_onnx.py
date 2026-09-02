@@ -6,10 +6,28 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from trainer.model import NUM_PLANES, NUM_SCALARS, build_model  # noqa: E402
+from trainer.model import NUM_PLANES, NUM_SCALARS, build_model
+
+
+class BitPackedInput(nn.Module):
+    """Wrapper that unpacks [B, 113, 8] uint8 bytes into [B, 113, 8, 8] float planes on GPU."""
+    def __init__(self, net: nn.Module):
+        super().__init__()
+        self.net = net
+        lut = torch.zeros(256, 8, dtype=torch.float32)
+        for v in range(256):
+            for i in range(8):
+                lut[v, i] = float((v >> i) & 1)
+        self.register_buffer("lut", lut, persistent=False)
+
+    def forward(self, planes_u8: torch.Tensor, scalars: torch.Tensor):
+        # planes_u8: [B, 113, 8] -> lut[planes_u8]: [B, 113, 8, 8]
+        planes = self.lut[planes_u8.long()].reshape(-1, NUM_PLANES, 8, 8)
+        return self.net(planes, scalars)
 
 
 def export(checkpoint: str | None, out: str, blocks: int, channels: int,
@@ -18,19 +36,22 @@ def export(checkpoint: str | None, out: str, blocks: int, channels: int,
 
     if checkpoint:
         ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        state = ckpt.get("model", ckpt)
+        state = ckpt.get("ema", ckpt.get("model", ckpt))
         model.load_state_dict(state)
-        print(f"loaded weights from {checkpoint}")
+        print(f"loaded weights from {checkpoint} (EMA={ 'ema' in ckpt })")
     else:
         print("no checkpoint given -> exporting randomly initialized net")
 
     model.eval()
+    wrapped_model = BitPackedInput(model)
+    wrapped_model.eval()
 
-    planes = torch.randint(0, 2, (batch_size, NUM_PLANES, 8, 8)).float()
-    scalars = torch.rand(batch_size, NUM_SCALARS)
+    # Dynamic uint8 dummy tensor [batch, 113, 8]
+    planes = torch.randint(0, 256, (batch_size, NUM_PLANES, 8), dtype=torch.uint8)
+    scalars = torch.rand(batch_size, NUM_SCALARS, dtype=torch.float32)
 
     torch.onnx.export(
-        model,
+        wrapped_model,
         (planes, scalars),
         out,
         input_names=["planes", "scalars"],
@@ -45,9 +66,9 @@ def export(checkpoint: str | None, out: str, blocks: int, channels: int,
         opset_version=17,
         dynamo=False,
     )
-    print(f"exported fp32 graph to {out}")
+    print(f"exported fp32 graph with bit-unpacking wrapper to {out}")
 
-    # convert to mixed fp16 (keep io types stable)
+    # convert internal graph ops to fp16 (leaves uint8 and float32 inputs intact)
     import onnx
     from onnxconverter_common import float16
 

@@ -11,7 +11,6 @@
 using namespace chess;
 
 static void cmd_perft(int argc, char** argv) {
-    // perft "<fen>" d1 [d2 ...]
     attacks::init();
     Position pos;
     pos.set_from_fen(argv[2]);
@@ -23,7 +22,6 @@ static void cmd_perft(int argc, char** argv) {
 }
 
 static void cmd_perft_split(int argc, char** argv) {
-    // perft-split "<fen>" depth -> "e2e4 <count>" per legal root move
     (void)argc;
     attacks::init();
     Position pos;
@@ -45,7 +43,6 @@ static void cmd_perft_split(int argc, char** argv) {
 }
 
 static void cmd_policy_index(int argc, char** argv) {
-    // policy-index "<fen>"  ->  one line per legal move: "e2e4 1234"
     (void)argc;
     attacks::init();
     Position pos;
@@ -66,7 +63,6 @@ static void cmd_policy_index(int argc, char** argv) {
 }
 
 static void cmd_encode(int argc, char** argv) {
-    // encode "<fen>" -> prints 112 hex plane words then 4 scalars
     (void)argc;
     attacks::init();
     Position pos;
@@ -87,8 +83,8 @@ int main(int argc, char** argv) {
                 "  encode \"<fen>\"\n"
                 "  selfplay --model M --out D [--games N] [--threads T] [--batch B]\n"
                 "           [--seed S] [--fast-visits V] [--full-visits V] [--fast-prob P]\n"
-                "           [--temp-plies N] [--prior-plies N] [--max-plies N]\n"
-                "           [--leaves-per-round N] [--shard-games G] [--cpu]\n"
+                "           [--min-fresh-visits V] [--temp-plies N] [--prior-plies N]\n"
+                "           [--max-plies N] [--leaves-per-round N] [--shard-games G] [--cpu]\n"
                 "           [--shard-start N] [--adjudicate-pawns P]\n"
                 "           [--resign-threshold Q] [--resign-min-ply N]\n"
                 "           [--resign-consecutive N] [--resign-continue F]\n"
@@ -125,7 +121,8 @@ int main(int argc, char** argv) {
             else if (!strcmp(argv[i], "--fast-visits")) cfg.fast_visits = nexti();
             else if (!strcmp(argv[i], "--full-visits")) cfg.full_visits = nexti();
             else if (!strcmp(argv[i], "--fast-prob")) cfg.fast_prob = nextf();
-            else if (!strcmp(argv[i], "--temp-plies")) cfg.temperature_plies = cfg.mcts.temperature_plies = nexti();
+            else if (!strcmp(argv[i], "--min-fresh-visits")) cfg.min_fresh_visits = nexti();
+            else if (!strcmp(argv[i], "--temp-plies")) cfg.temperature_plies = nexti();
             else if (!strcmp(argv[i], "--prior-plies")) cfg.prior_plies = nexti();
             else if (!strcmp(argv[i], "--max-plies")) cfg.max_plies = nexti();
             else if (!strcmp(argv[i], "--leaves-per-round")) cfg.leaves_per_round = nexti();
@@ -143,10 +140,9 @@ int main(int argc, char** argv) {
             else if (!strcmp(argv[i], "--cpu")) cpu = true;
         }
         if (model.empty()) { fprintf(stderr, "--model required\n"); return 2; }
-        // keep SelfPlayConfig and its embedded MCTSConfig in sync regardless of
-        // whether the flags were passed (mirrors the defaults on both structs)
         cfg.mcts.temperature_plies = cfg.temperature_plies;
         cfg.mcts.prior_plies = cfg.prior_plies;
+        cfg.mcts.contempt = cfg.contempt;
         return run_selfplay(model, out, games, threads, cfg,
                             static_cast<uint64_t>(seed), shard_games, !cpu,
                             games_per_worker, shard_start);

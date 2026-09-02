@@ -1,13 +1,13 @@
 # Central configuration - single source of truth for engine + trainer + orchestrator
 
 run:
-  name: chessbot-v1
+  name: chessbot
   data_dir: data/selfplay
   checkpoint_dir: checkpoints
   model_dir: models
 
 net:
-  blocks: 6          # start small, scale up as Elo grows
+  blocks: 6
   channels: 96
 
 selfplay:
@@ -22,6 +22,7 @@ selfplay:
   fast_visits: 256
   full_visits: 1024
   fast_prob: 0.70
+  min_fresh_visits: 64          # Guarantees fresh exploration at every ply
   leaves_per_round: 32          # more in-flight leaves per game -> fuller GPU batches
   temperature_plies: 40
   prior_plies: 20               # chaos window: ~40 random-ish plies create the imbalances
@@ -66,7 +67,7 @@ train:
   checkpoint_every_steps: 400
   keep_last_checkpoints: 3
   replay_window: 1500000        # ~10 iterations of replay: fresher data + cache fits RAM
-  cache_shards: 320             # ~1.3GB RAM; ~70% hit rate at the 1.5M window (was 256/3M
+  cache_shards: 500             # ~1.3GB RAM; ~70% hit rate at the 1.5M window (was 256/3M
                                 # = 29% -> gzip thrash made training 20x slower)
 
 gate:
@@ -76,7 +77,7 @@ gate:
                            # export; anchor match is measurement only
   games: 160               # enough that +/-1 se (~7 Elo) can't flunk/promote real changes
   visits: 160
-  batch_size: 256
+  batch_size: 512
   threads: 8
   games_per_worker: 4
   min_score: 0.55     # (unused in measurement_only mode)

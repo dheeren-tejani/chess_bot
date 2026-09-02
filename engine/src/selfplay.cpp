@@ -8,15 +8,11 @@
 #include <algorithm>
 #include <random>
 #include <fstream>
-
 #include <zlib.h>
 #include <map>
 
 namespace chess {
 
-// ---------------------------------------------------------------------------
-// EvalBatcher
-// ---------------------------------------------------------------------------
 void EvalBatcher::set_mailboxes(int n) {
     mailboxes_.clear();
     for (int i = 0; i < n; ++i) mailboxes_.push_back(std::make_unique<Mailbox>());
@@ -33,23 +29,32 @@ void EvalBatcher::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
-void EvalBatcher::submit(int owner, Search* s, int slot) {
+void EvalBatcher::submit(int owner, Search* s, EvalTask&& t) {
     {
         std::lock_guard<std::mutex> lk(mu_);
-        queue_.push_back({owner, s, slot});
+        queue_.push_back({owner, s, std::move(t)});
     }
     submitted.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_one();
 }
 
-size_t EvalBatcher::drain_wait(int owner, std::vector<std::pair<Search*, int>>& out,
-                               int timeout_ms) {
+void EvalBatcher::submit_many(int owner, Search* s, std::vector<EvalTask>& ts) {
+    if (ts.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto& t : ts) queue_.push_back({owner, s, std::move(t)});
+    }
+    submitted.fetch_add(ts.size(), std::memory_order_relaxed);
+    cv_.notify_one();
+}
+
+size_t EvalBatcher::drain_wait(int owner, std::vector<Item>& out, int timeout_ms) {
     Mailbox& mb = *mailboxes_[owner];
     std::unique_lock<std::mutex> lk(mb.mu);
     if (mb.q.empty() && timeout_ms > 0)
         mb.cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
                        [&] { return !mb.q.empty(); });
-    out.insert(out.end(), mb.q.begin(), mb.q.end());
+    out.insert(out.end(), std::make_move_iterator(mb.q.begin()), std::make_move_iterator(mb.q.end()));
     size_t k = mb.q.size();
     mb.q.clear();
     return k;
@@ -60,15 +65,13 @@ void EvalBatcher::feeder_loop() {
     std::vector<uint64_t> planes(static_cast<size_t>(batch_size_) * NUM_PLANES);
     std::vector<float> scalars(static_cast<size_t>(batch_size_) * SCALAR_COUNT, 0.f);
     std::vector<float> policy, wdl, mat;
+    std::vector<int> idx;
 
-    auto fill_task = [&](Item& it, int row) {
-        EvalTask& t = it.search->task(it.slot);
+    auto fill_task = [&](EvalTask& t, int row) {
         const float* prow = policy.data() + static_cast<size_t>(row) * POLICY_ACTIONS;
-
-        // masked softmax over legal-move action indices
         const size_t K = t.moves.size();
         float maxl = -1e30f;
-        std::vector<int> idx(K);
+        idx.resize(K);
         for (size_t k = 0; k < K; ++k) {
             Move m = unpack_move(t.moves[k]);
             idx[k] = move_policy_index(m, static_cast<Color>(t.stm));
@@ -87,16 +90,16 @@ void EvalBatcher::feeder_loop() {
                e2 = std::exp(wrow[2] - wmax);
         double es = e0 + e1 + e2;
         
-        // 1. Calculate base in [0, 1] with contempt
-        double base = (e0 + static_cast<double>(contempt_) * e1) / es;
-
-        // 2. Map to the engine's [-1, 1] scale
+        double c_eff = (t.stm == t.root_stm) ? static_cast<double>(contempt_)
+                                              : (1.0 - static_cast<double>(contempt_));
+        double base = (e0 + c_eff * e1) / es;
         base = 2.0 * base - 1.0;
 
-        // 3. Blend material heuristic if enabled, clamping to valid bounds
         if (value_mat_alpha_ != 0.f) {
+            // train.py trains the material head on target = material/8, so `m` is
+            // already in that scale — don't divide again.
             double m = static_cast<double>(mat[static_cast<size_t>(row)]);
-            base += value_mat_alpha_ * (m / 8.0);
+            base += value_mat_alpha_ * m;
         }
         t.value = static_cast<float>(std::max(-1.0, std::min(1.0, base)));
     };
@@ -110,8 +113,6 @@ void EvalBatcher::feeder_loop() {
                 if (!running_.load()) return;
                 continue;
             }
-            // Fill-window: once the first item arrives, give stragglers up to 4 ms
-            // to top the batch up. Huge win at small per-pass submission counts.
             if (queue_.size() < static_cast<size_t>(batch_size_)) {
                 auto deadline = std::chrono::steady_clock::now() +
                                 std::chrono::milliseconds(4);
@@ -120,50 +121,47 @@ void EvalBatcher::feeder_loop() {
                 });
             }
             size_t take = std::min(queue_.size(), static_cast<size_t>(batch_size_));
-            local.assign(queue_.end() - take, queue_.end());
-            queue_.resize(queue_.size() - take);
+            local.assign(std::make_move_iterator(queue_.begin()),
+                         std::make_move_iterator(queue_.begin() + take));
+            queue_.erase(queue_.begin(), queue_.begin() + take);
         }
 
-        const int B = batch_size_;
-        for (int b = 0; b < B; ++b) {
-            size_t j = std::min<size_t>(b, local.size() - 1);
-            const EvalTask& t = local[j].search->task(local[j].slot);
+        const size_t n = local.size();
+        for (size_t b = 0; b < n; ++b) {
+            const EvalTask& t = local[b].task;
             std::copy(t.enc.planes.begin(), t.enc.planes.end(),
-                      planes.begin() + static_cast<size_t>(b) * NUM_PLANES);
+                      planes.begin() + b * NUM_PLANES);
             std::copy(t.enc.scalars.begin(), t.enc.scalars.end(),
-                      scalars.begin() + static_cast<size_t>(b) * SCALAR_COUNT);
+                      scalars.begin() + b * SCALAR_COUNT);
         }
 
-        nn_.evaluate(planes.data(), scalars.data(), policy, wdl, mat);
+        nn_.evaluate(planes.data(), scalars.data(), static_cast<int>(n), policy, wdl, mat);
 
-        // fill tasks (no tree mutation!) and route to owners
-        for (size_t i = 0; i < local.size(); ++i) {
-            fill_task(local[i], static_cast<int>(std::min<size_t>(i, local.size() - 1)));
+        for (size_t i = 0; i < n; ++i) {
+            fill_task(local[i].task, static_cast<int>(i));
         }
-        for (size_t i = 0; i < local.size(); ++i) {
-            Item& it = local[i];
+
+        for (size_t i = 0; i < n; ++i) {
+            int owner = local[i].owner;
+            Mailbox& mb = *mailboxes_[owner];
             {
-                Mailbox& mb = *mailboxes_[it.owner];
                 std::lock_guard<std::mutex> lk(mb.mu);
-                mb.q.emplace_back(it.search, it.slot);
+                mb.q.push_back(std::move(local[i]));
             }
-            mailboxes_[it.owner]->cv.notify_one();
+            mailboxes_[owner]->cv.notify_one();
         }
-        routed.fetch_add(local.size(), std::memory_order_relaxed);
-        batches_run.fetch_add(1, std::memory_order_relaxed);
-        last_batch_size.store((int)local.size(), std::memory_order_relaxed);
 
-        evals_done.fetch_add(local.size(), std::memory_order_relaxed);
-        completed_.fetch_add(local.size(), std::memory_order_release);
+        routed.fetch_add(n, std::memory_order_relaxed);
+        batches_run.fetch_add(1, std::memory_order_relaxed);
+        last_batch_size.store(static_cast<int>(n), std::memory_order_relaxed);
+        evals_done.fetch_add(n, std::memory_order_relaxed);
+        completed_.fetch_add(n, std::memory_order_release);
         cv_.notify_all();
 
         local.clear();
     }
 }
 
-// ---------------------------------------------------------------------------
-// ShardWriter
-// ---------------------------------------------------------------------------
 static void put_u16(std::vector<char>& v, uint16_t x) {
     v.push_back(char(x & 0xFF));
     v.push_back(char((x >> 8) & 0xFF));
@@ -183,7 +181,6 @@ void ShardWriter::add_game(FinishedGame&& g) {
             std::memcpy(&bits, &f, 4);
             put_u32(buf_, bits);
         }
-        // store top-K moves BY VISITS so the mass we keep is the mass that matters
         std::vector<std::pair<int, int>> dist = s.visit_dist;
         std::sort(dist.begin(), dist.end(),
                   [](auto& a, auto& b) { return a.second > b.second; });
@@ -197,9 +194,7 @@ void ShardWriter::add_game(FinishedGame&& g) {
         for (; filled < POLICY_SLOTS; ++filled) { put_u16(buf_, 0xFFFF); put_u16(buf_, 0); }
 
         buf_.push_back(char(g.result));
-        // f16 encode of material diff (values are small ints; use half bits)
         auto to_f16 = [](float f) -> uint16_t {
-            // simple IEEE half conversion (handles our tiny range)
             uint32_t bits;
             std::memcpy(&bits, &f, 4);
             uint32_t sign = (bits >> 16) & 0x8000;
@@ -232,17 +227,15 @@ void ShardWriter::flush() {
     snprintf(name, sizeof(name), "%s/%s_%06lu.gz", out_dir_.c_str(), prefix_.c_str(),
              static_cast<unsigned long>(next_shard_id_++));
 
-    // Write to a temp name and rename atomically so concurrent readers (the
-    // trainer's dataset scanner) never observe a partially written shard.
     std::string tmp_name = std::string(name) + ".tmp";
-    gzFile f = gzopen(tmp_name.c_str(), "wb");
+    gzFile f = gzopen(tmp_name.c_str(), "wb1");
     if (!f) {
         fprintf(stderr, "FATAL cannot open shard %s\n", tmp_name.c_str());
         exit(1);
     }
     std::vector<char> header;
     header.push_back('C'); header.push_back('B'); header.push_back('S'); header.push_back('P');
-    put_u32(header, 1);                    // version
+    put_u32(header, 1);
     put_u32(header, static_cast<uint32_t>(buffered_games_));
     put_u64(header, model_hash_);
     gzwrite(f, header.data(), static_cast<unsigned>(header.size()));
@@ -260,9 +253,6 @@ void ShardWriter::flush() {
     buffered_games_positions_ = 0;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 static uint64_t fnv1a_file(const std::string& path) {
     FILE* fp = fopen(path.c_str(), "rb");
     if (!fp) return 0;
@@ -278,10 +268,6 @@ static uint64_t fnv1a_file(const std::string& path) {
     return h;
 }
 
-// ---------------------------------------------------------------------------
-// Self-play: pipelined workers, each driving several concurrent games so the
-// GPU batch queue stays full.
-// ---------------------------------------------------------------------------
 struct SharedStats {
     std::atomic<uint64_t> games_done{0};
     std::atomic<uint64_t> positions_written{0};
@@ -293,55 +279,21 @@ struct GameSlot {
     FinishedGame game;
     int ply = 0;
     int budget = 0;
-    size_t inflight = 0;         // this game's submitted-not-yet-completed tasks
+    int visits_base = 0;
+    size_t inflight = 0;
     bool move_ready = false;
     bool finished = false;
-    bool exhausted = false;      // no more games left to claim
+    bool exhausted = false;
     bool resigned = false;
     int resign_streak = 0;
 };
 
-// Finish a move decision on `g`: sample, resign, pick and apply.
-// Returns true if the game ended.
 static bool conclude_move(SelfPlayConfig& cfg, GameSlot& g, std::mt19937_64& rng,
                           const char** end_reason) {
     Search& s = *g.search;
     const Position& cur = s.root_position();
 
-    if (getenv("CHESS_DEBUG"))
-        fprintf(stderr,
-                "{\"type\":\"conclude\",\"ply\":%d,\"visits\":%u,\"budget\":%d,"
-                "\"inflight\":%zu,\"num\":%d}\n",
-                g.ply, s.root_visits(), g.budget, g.inflight,
-                s.tree().node(s.root()).num);
-
-    // rule-based endings without a move
-    if (cur.halfmove >= 100 || insufficient_material(cur) || g.ply >= cfg.max_plies) {
-        if (cur.halfmove >= 100) {
-            g.game.result = 1;
-            *end_reason = "50move";
-        } else if (insufficient_material(cur)) {
-            g.game.result = 1;
-            *end_reason = "material";
-        } else if (cfg.adjudicate_material_pawns > 0.f) {
-            // Ply-cap adjudication by material: gives the value net decisive
-            // labels instead of a flood of "everything is a draw" targets.
-            int d = material_diff_stm(cur);
-            int white_diff = (cur.stm == WHITE) ? d : -d;
-            if (std::abs(white_diff) >= static_cast<int>(cfg.adjudicate_material_pawns)) {
-                g.game.result = (white_diff > 0) ? 0 : 2;
-                *end_reason = "cap-material";
-            } else {
-                g.game.result = 1;
-                *end_reason = "maxplies";
-            }
-        } else {
-            g.game.result = 1;
-            *end_reason = "maxplies";
-        }
-        return true;
-    }
-
+    // 1) Mate/stalemate check first
     const Tree::Node& rn = s.tree().node(s.root());
     if (rn.state == Tree::ST_TERMINAL || rn.num == 0) {
         std::vector<Move> legal;
@@ -360,7 +312,36 @@ static bool conclude_move(SelfPlayConfig& cfg, GameSlot& g, std::mt19937_64& rng
         return true;
     }
 
-    // resignation
+    // 2) Rule-based draws / adjudications
+    if (cur.halfmove >= 100) {
+        g.game.result = 1;
+        *end_reason = "50move";
+        return true;
+    }
+    if (insufficient_material(cur)) {
+        g.game.result = 1;
+        *end_reason = "material";
+        return true;
+    }
+    if (g.ply >= cfg.max_plies) {
+        if (cfg.adjudicate_material_pawns > 0.f) {
+            int d = material_diff_stm(cur);
+            int white_diff = (cur.stm == WHITE) ? d : -d;
+            if (std::abs(white_diff) >= static_cast<int>(cfg.adjudicate_material_pawns)) {
+                g.game.result = (white_diff > 0) ? 0 : 2;
+                *end_reason = "cap-material";
+            } else {
+                g.game.result = 1;
+                *end_reason = "maxplies";
+            }
+        } else {
+            g.game.result = 1;
+            *end_reason = "maxplies";
+        }
+        return true;
+    }
+
+    // 3) Resignation check
     if (cfg.resign_enabled && g.ply >= cfg.resign_min_ply) {
         float q = s.root_q();
         if (q < cfg.resign_threshold) {
@@ -378,7 +359,7 @@ static bool conclude_move(SelfPlayConfig& cfg, GameSlot& g, std::mt19937_64& rng
         }
     }
 
-    // training sample from the pre-move root
+    // 4) Record training sample
     Sample smp;
     s.root_visit_distribution(smp.visit_dist);
     smp.enc = encode_position(cur, s.history());
@@ -386,11 +367,12 @@ static bool conclude_move(SelfPlayConfig& cfg, GameSlot& g, std::mt19937_64& rng
     smp.stm = cur.stm;
     g.game.samples.push_back(std::move(smp));
 
+    // 5) Pick move & apply
     Search::Choice ch = s.pick_move(rng, g.ply);
     s.apply_root_move(ch.move, ch.child_node);
+    g.visits_base = s.root_visits();
     ++g.ply;
 
-    // threefold repetition in the actual game
     const std::vector<Position>& h = s.history();
     uint64_t hh = h.back().hash;
     int seen = 0;
@@ -427,7 +409,6 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
     std::atomic<int> next_game{0};
     std::mutex writer_mu;
 
-    // game-end telemetry (aggregated into the final summary JSON)
     std::mutex end_mu;
     std::map<std::string, uint64_t> end_reasons;
     std::atomic<uint64_t> res_white{0}, res_draw{0}, res_black{0}, res_resigned{0};
@@ -453,7 +434,9 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
         workers.emplace_back([&, t] {
             std::mt19937_64 rng(seed * 0x9E3779B97F4A7C15ULL + t + 1);
             std::vector<GameSlot> slots(games_per_worker);
-            std::vector<std::pair<Search*, int>> ready;
+            std::vector<EvalBatcher::Item> ready;
+            std::vector<EvalTask> ts;                 // NEW — hoisted out of the slot loop
+            ts.reserve(static_cast<size_t>(cfg.leaves_per_round));
 
             auto start_new = [&](GameSlot& g) {
                 std::vector<Position> hist(1);
@@ -462,6 +445,7 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
                 g.search = std::make_unique<Search>(cfg.mcts, std::move(hist), &rng);
                 g.game = FinishedGame{};
                 g.ply = 0;
+                g.visits_base = 0;
                 g.inflight = 0;
                 g.move_ready = false;
                 g.finished = false;
@@ -470,6 +454,7 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
                 g.resign_streak = 0;
                 float roll = std::uniform_real_distribution<float>(0.f, 1.f)(rng);
                 g.budget = (roll < cfg.fast_prob) ? cfg.fast_visits : cfg.full_visits;
+                g.search->set_budget(g.budget);
             };
             auto try_claim = [&](GameSlot& g) {
                 int gid = next_game.fetch_add(1);
@@ -484,21 +469,16 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
 
             for (auto& g : slots) try_claim(g);
 
-            int wait_ms = 0;   // grows when starved, reset on progress
-            while (!stop.load()) {
-                // 1) fold in completed evaluations (single-writer-per-tree rule).
-                //    Blocks up to wait_ms when we have nothing else to do.
+            int wait_ms = 0;
+            for (;;) {
                 ready.clear();
                 size_t got = batcher.drain_wait(t, ready, wait_ms);
-                for (auto& [sptr, slot] : ready) {
+                for (auto& item : ready) {
                     for (auto& g : slots) {
                         if (!g.search || g.exhausted) continue;
-                        if (g.search.get() == sptr) {
-                            g.inflight -= 1;
-                            break;
-                        }
+                        if (g.search.get() == item.search) { g.inflight -= 1; break; }
                     }
-                    sptr->complete_task(slot);
+                    item.search->complete_task(std::move(item.task));
                 }
 
                 bool any_progress = got > 0;
@@ -514,10 +494,6 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
                         g.move_ready = false;
                         any_progress = true;
                         if (ended) {
-                            fprintf(stderr,
-                                    "{\"type\":\"gameend\",\"plies\":%d,\"samples\":%zu,"
-                                    "\"why\":\"%s\",\"result\":%u}\n",
-                                    g.ply, g.game.samples.size(), why, g.game.result);
                             record_end(why, g.game.result, g.resigned);
                             g.finished = true;
                         } else {
@@ -525,36 +501,41 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
                                 std::uniform_real_distribution<float>(0.f, 1.f)(rng);
                             g.budget =
                                 (roll < cfg.fast_prob) ? cfg.fast_visits : cfg.full_visits;
+                            g.search->set_budget(g.budget);
                         }
                         continue;
                     }
 
-                    // budget / terminal gate: this game's OWN inflight only
-                    {
-                        const Tree::Node& rn = g.search->tree().node(g.search->root());
-                        if (rn.state == Tree::ST_TERMINAL ||
-                            (g.inflight == 0 && g.search->root_visits() >= g.budget)) {
-                            g.move_ready = true;
-                            continue;
-                        }
+                    // Budget + minimum-fresh-visits gate
+                    const Tree::Node& rn = g.search->tree().node(g.search->root());
+                    int rv = static_cast<int>(g.search->root_visits());
+                    int fresh = rv - g.visits_base;
+                    int need_fresh = std::min(cfg.min_fresh_visits, g.budget);
+                    bool budget_met = (rv >= g.budget) && (fresh >= need_fresh);
+
+                    if (rn.state == Tree::ST_TERMINAL || (g.inflight == 0 && budget_met)) {
+                        g.move_ready = true;
+                        continue;
                     }
 
-                    // gather new work while under budget (with one round of lookahead
-                    // so the GPU stays fed across budget boundaries)
-                    if (static_cast<int>(g.search->root_visits() + g.inflight) <
-                        g.budget + cfg.leaves_per_round) {
-                        std::vector<int> ts;
-                        ts.reserve(32);
+                    // Gather while either the total budget OR the fresh-visits
+                    // requirement is short. Without this second clause, a reused
+                    // subtree that already exceeds budget+leaves_per_round in
+                    // total visits stops gathering forever while fresh sits at 0
+                    // (livelock: move_ready never becomes true).
+                    bool need_more_total = (rv + static_cast<int>(g.inflight)) < (g.budget + cfg.leaves_per_round);
+                    bool need_more_fresh = (fresh + static_cast<int>(g.inflight)) < need_fresh;
+                    if (need_more_total || need_more_fresh) {
+                        ts.clear();
                         g.search->gather_round(cfg.leaves_per_round, ts);
                         if (!ts.empty()) {
-                            for (int sl : ts) batcher.submit(t, g.search.get(), sl);
                             g.inflight += ts.size();
+                            batcher.submit_many(t, g.search.get(), ts);
                             any_progress = true;
                         }
                     }
                 }
 
-                // harvest finished games and claim new ones
                 for (auto& g : slots) {
                     if (g.finished && !g.exhausted) {
                         size_t nsamples = g.game.samples.size();
@@ -570,12 +551,22 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
                 }
 
                 if (all_exhausted) break;
-                wait_ms = any_progress ? 0 : 5;   // block on our mailbox when starved
+
+                // Shutdown drain: after a global stop, exit only once every slot's
+                // in-flight evaluations have come home (otherwise the feeder would
+                // touch freed Search objects on its final batches).
+                if (stop.load()) {
+                    bool any_inflight = false;
+                    for (auto& g : slots)
+                        if (!g.exhausted && g.inflight > 0) { any_inflight = true; break; }
+                    if (!any_inflight) break;
+                }
+
+                wait_ms = any_progress ? 0 : 5;
             }
         });
     }
 
-    // stats printer
     uint64_t last_evals = 0;
     auto last_t = t_start;
     while (!stop.load()) {
@@ -609,7 +600,6 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
         writer.flush();
     }
 
-    // authoritative per-run summary for the orchestrator (stdout)
     {
         uint64_t gd = stats.games_done.load();
         uint64_t plies = stats.total_plies.load();
@@ -633,27 +623,22 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
         fflush(stdout);
     }
 
-    fprintf(stderr, "{\"type\":\"done\",\"games\":%lu}\n",
-            (unsigned long)stats.games_done.load());
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Match (parallel, batched through two evaluators)
-// ---------------------------------------------------------------------------
 std::string run_match(const std::string& model_a, const std::string& model_b,
                       int games, int visits, int batch_size, bool prefer_gpu,
                       int threads, int games_per_worker, const std::string& pgn_out) {
     attacks::init();
     MCTSConfig mc;
     mc.root_dirichlet = false;
-    mc.temperature_plies = 8;   // small opening variety, then greedy
+    mc.temperature_plies = 8;
 
     struct MatchGame {
         std::unique_ptr<Search> search;
         bool a_is_white = true;
         int ply = 0;
-        int result = -1;          // 0 white, 1 draw, 2 black ; -1 ongoing
+        int result = -1;
         int game_id = 0;
         std::vector<std::string> moves;
         size_t inflight = 0;
@@ -679,9 +664,7 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
 
     std::mutex pgn_mu;
     if (!pgn_out.empty()) {
-        std::ofstream init_file(pgn_out, std::ios::trunc);   // truncate once, before any worker starts
-        if (!init_file.is_open())
-            fprintf(stderr, "[warn] could not open pgn file %s for writing\n", pgn_out.c_str());
+        std::ofstream init_file(pgn_out, std::ios::trunc);
     }
 
     batch_a.start();
@@ -692,13 +675,14 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
         workers.emplace_back([&, t] {
             std::mt19937_64 rng(0x6D7A4B3ULL * (t + 1));
             std::vector<MatchGame> slots(games_per_worker);
-            std::vector<std::pair<Search*, int>> ready;
+            std::vector<EvalBatcher::Item> ready;
 
             auto start_new = [&](MatchGame& g, int gid) {
                 std::vector<Position> hist(1);
                 hist[0].set_from_fen(
                     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
                 g.search = std::make_unique<Search>(mc, std::move(hist), &rng);
+                g.search->set_budget(visits);
                 g.a_is_white = (gid % 2 == 0);
                 g.ply = 0;
                 g.result = -1;
@@ -718,14 +702,10 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
             };
             for (auto& g : slots) try_claim(g);
 
-            // returns true when the game has ended (result set)
             auto conclude = [&](MatchGame& g) -> bool {
                 Search& s = *g.search;
                 const Position& cur = s.root_position();
-                if (cur.halfmove >= 100 || insufficient_material(cur) || g.ply >= 300) {
-                    g.result = 1;
-                    return true;
-                }
+                
                 const Tree::Node& rn = s.tree().node(s.root());
                 std::vector<Move> legal;
                 gen_legal_moves(cur, legal);
@@ -739,6 +719,12 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
                         : 1;
                     return true;
                 }
+
+                if (cur.halfmove >= 100 || insufficient_material(cur) || g.ply >= 300) {
+                    g.result = 1;
+                    return true;
+                }
+
                 uint64_t hh = s.history().back().hash;
                 int seen = 0;
                 for (const Position& p : s.history())
@@ -747,7 +733,6 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
 
                 Search::Choice ch = s.pick_move(rng, g.ply);
 
-                // Record move in UCI notation (e.g. "e2e4", "e7e8q")
                 Move m = unpack_move(ch.move);
                 auto sqname = [](int sq) {
                     char buf[3] = {static_cast<char>('a' + file_of(sq)), static_cast<char>('1' + rank_of(sq)), 0};
@@ -767,16 +752,16 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
                 ready.clear();
                 size_t got = batch_a.drain_wait(t, ready, wait_ms);
                 {
-                    std::vector<std::pair<Search*, int>> rb;
+                    std::vector<EvalBatcher::Item> rb;
                     got += batch_b.drain_wait(t, rb, 0);
-                    ready.insert(ready.end(), rb.begin(), rb.end());
+                    ready.insert(ready.end(), std::make_move_iterator(rb.begin()), std::make_move_iterator(rb.end()));
                 }
-                for (auto& [sptr, slot] : ready) {
+                for (auto& item : ready) {
                     for (auto& g : slots) {
                         if (!g.search || g.exhausted) continue;
-                        if (g.search.get() == sptr) { g.inflight -= 1; break; }
+                        if (g.search.get() == item.search) { g.inflight -= 1; break; }
                     }
-                    sptr->complete_task(slot);
+                    item.search->complete_task(std::move(item.task));
                 }
 
                 bool any_progress = got > 0;
@@ -831,9 +816,8 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
                             continue;
                         }
                     }
-                    if (static_cast<int>(g.search->root_visits() + g.inflight) <
-                        visits + 16) {
-                        std::vector<int> ts;
+                    if (static_cast<int>(g.search->root_visits() + g.inflight) < visits + 16) {
+                        std::vector<EvalTask> ts;
                         ts.reserve(16);
                         g.search->gather_round(16, ts);
                         if (!ts.empty()) {
@@ -841,8 +825,8 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
                                 ((g.search->root_position().stm == WHITE) ==
                                  g.a_is_white);
                             EvalBatcher& B = a_moves ? batch_a : batch_b;
-                            for (int sl : ts) B.submit(t, g.search.get(), sl);
                             g.inflight += ts.size();
+                            for (auto& tk : ts) B.submit(t, g.search.get(), std::move(tk));
                             any_progress = true;
                         }
                     }
@@ -872,7 +856,6 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
     double score_a = w + 0.5 * d;
     double p = score_a / std::max(games, 1);
     
-    // Continuity correction clamp: prevents log10(0) on sweeps (p=0 or p=1)
     double p_clamped = std::max(0.5 / std::max(games, 1), 
                                 std::min(1.0 - 0.5 / std::max(games, 1), p));
     double elo = -400.0 * std::log10(1.0 / p_clamped - 1.0);
@@ -885,6 +868,7 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
              games, w, d, l, p, elo, se);
     return std::string(buf);
 }
+
 int run_bench(const std::string& model_path, int seconds, int batch_size, bool prefer_gpu) {
     attacks::init();
     NNEvaluator nn;
@@ -893,15 +877,14 @@ int run_bench(const std::string& model_path, int seconds, int batch_size, bool p
         fprintf(stderr, "FATAL %s\n", err.c_str());
         return 1;
     }
-    std::vector<uint64_t> planes(static_cast<size_t>(batch_size) * NUM_PLANES);
-    for (auto& x : planes) x = 0xDEADBEEFCAFEBABEULL;
+    std::vector<uint64_t> planes(static_cast<size_t>(batch_size) * NUM_PLANES, 0xDEADBEEFCAFEBABEULL);
     std::vector<float> scalars(static_cast<size_t>(batch_size) * SCALAR_COUNT, 0.f);
     std::vector<float> p, wv, m;
-    nn.evaluate(planes.data(), scalars.data(), p, wv, m);   // warmup
+    nn.evaluate(planes.data(), scalars.data(), batch_size, p, wv, m);
     auto t0 = std::chrono::steady_clock::now();
     long long iters = 0;
     for (;;) {
-        nn.evaluate(planes.data(), scalars.data(), p, wv, m);
+        nn.evaluate(planes.data(), scalars.data(), batch_size, p, wv, m);
         ++iters;
         double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (el >= seconds) {

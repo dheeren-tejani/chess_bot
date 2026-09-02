@@ -75,19 +75,23 @@ public:
             if (legal.empty()) return 0;   // mated/stalemated already                                                                                     
         }                                                                                                                                                  
                                                                                                                                                            
-        std::vector<int> slots;                                                                                                                            
-        while (s.root_visits() < max_visits && !stop_.load()) {                                                                                            
-            slots.clear();                                                                                                                                 
-            s.gather_round(1, slots);      // 1 leaf at a time: eval is synchronous                                                                        
-            if (slots.empty()) break;      // tree fully terminal (forced line)                                                                            
-            EvalTask& t = s.task(slots[0]);                                                                                                                
-            eval(t);                                                                                                                                       
-            s.complete_task(slots[0]);                                                                                                                     
-                                                                                                                                                           
-            double el = std::chrono::duration<double>(                                                                                                     
-                std::chrono::steady_clock::now() - t0).count();                                                                                            
-            if (el >= time_s) break;                                                                                                                       
-            if (s.root_visits() % 64 == 0) print_info(s, el);                                                                                              
+        std::vector<EvalTask> tasks;
+        auto elapsed = [&] {
+            return std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - t0).count();
+        };
+        while (s.root_visits() < max_visits && !stop_.load() && elapsed() < time_s) {
+            tasks.clear();
+            // A single descent can end in a terminal backprop without producing
+            // a task; keep descending until one produces work so the search
+            // doesn't stop at the first terminal found mid-tree.
+            while (tasks.empty() && s.root_visits() < max_visits && !stop_.load() &&
+                   elapsed() < time_s)
+                s.gather_round(1, tasks);
+            if (tasks.empty()) break;   // nothing expandable left in the whole tree
+            eval(tasks[0]);
+            s.complete_task(std::move(tasks[0]));
+            if (s.root_visits() % 64 == 0) print_info(s, elapsed());
         }                                                                                                                                                  
         auto ch = s.pick_move(rng_, 100000);  // ply >> any temperature -> greedy                                                                          
         return ch.move;                     // 0 only if root never expanded                                                                               
@@ -98,7 +102,7 @@ public:
 private:                                                                                                                                                   
     void eval(EvalTask& t) {   // mirrors EvalBatcher::fill_task, contempt=0.5                                                                             
         std::vector<float> policy, wdl, mat;                                                                                                               
-        nn_.evaluate(t.enc.planes.data(), t.enc.scalars.data(), policy, wdl, mat);                                                                         
+        nn_.evaluate(t.enc.planes.data(), t.enc.scalars.data(), 1, policy, wdl, mat);                                                                         
                                                                                                                                                            
         const size_t K = t.moves.size();                                                                                                                   
         std::vector<int> idx(K);                                                                                                                           
@@ -179,13 +183,22 @@ int run_uci(const std::string& model_path, int default_visits, bool prefer_gpu) 
             std::string word, name, v; int val = 0;                                                                                                        
             is >> word >> name >> v >> val;              // "name Visits value N"                                                                          
             if (name == "Visits" && val > 0) default_visits = val;                                                                                         
-        } else if (tok == "position") {                                                                                                                    
-            join_worker();                                                                                                                                 
-            std::string what;                                                                                                                              
-            is >> what;                                                                                                                                    
-            if (what == "startpos") {                                                                                                                      
-                hist.assign(1, Position{});                                                                                                                
-                hist[0].set_from_fen(START_FEN);                                                                                                           
+        } else if (tok == "position") {
+            join_worker();
+            std::string what;
+            is >> what;
+            if (what == "startpos") {
+                hist.assign(1, Position{});
+                hist[0].set_from_fen(START_FEN);
+                std::string kw;
+                if (is >> kw && kw == "moves") {
+                    std::string mv;
+                    while (is >> mv) {
+                        Move m;
+                        if (parse_uci_move(hist.back(), mv, m))
+                            hist.push_back(make_move(hist.back(), m));
+                    }
+                }                                                                                                           
             } else if (what == "fen") {                                                                                                                    
                 std::string fen, kw;                                                                                                                       
                 for (int i = 0; i < 6; ++i) {            // up to 6 FEN fields                                                                             

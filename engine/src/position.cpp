@@ -445,7 +445,8 @@ void gen_pseudo(const Position& pos, std::vector<Move>& out) {
 
 void gen_legal_moves(const Position& pos, std::vector<Move>& out) {
     out.clear();
-    std::vector<Move> pseudo;
+    thread_local std::vector<Move> pseudo;
+    pseudo.clear();
     pseudo.reserve(48);
     if (pos.stm == WHITE) gen_pseudo<WHITE>(pos, pseudo);
     else gen_pseudo<BLACK>(pos, pseudo);
@@ -488,10 +489,14 @@ bool insufficient_material(const Position& pos) {
     bool only_bishops = (all & ~(minors | pos.bb[piece_idx(WHITE, KING)] | pos.bb[piece_idx(BLACK, KING)])) == 0
                         && __builtin_popcountll(minors) == __builtin_popcountll(all) - 2;
     if (only_bishops) {
-        int color = __builtin_ctzll(minors) & 1;
+        int first = __builtin_ctzll(minors);
+        int color = (file_of(first) + rank_of(first)) & 1;   // true square color
         uint64_t tmp = minors;
         bool same = true;
-        while (tmp) { int s = __builtin_ctzll(tmp); tmp &= tmp - 1; if ((s & 1) != color) same = false; }
+        while (tmp) {
+            int s = __builtin_ctzll(tmp); tmp &= tmp - 1;
+            if (((file_of(s) + rank_of(s)) & 1) != color) same = false;
+        }
         if (same) return true;
     }
     return false;

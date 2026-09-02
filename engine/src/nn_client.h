@@ -8,10 +8,6 @@
 
 namespace chess {
 
-// Batched ONNX Runtime inference client.
-// Contract: model inputs  "planes" uint8 [B,112,8,8], "scalars" float [B,4]
-//           model outputs "policy" float [B,4672], "wdl" float [B,3], "material" float [B,1]
-// Single-threaded use (one evaluator owned by one feeder thread).
 class NNEvaluator {
 public:
     NNEvaluator();
@@ -25,11 +21,8 @@ public:
     int batch_size() const { return batch_size_; }
     bool is_gpu() const { return gpu_; }
 
-    // Evaluate exactly `batch_size_` positions (caller pads).
-    // planes_words: batch_size_ * NUM_PLANES packed uint64 words.
-    // scalars:      batch_size_ * SCALAR_COUNT floats.
-    // Outputs resized to [batch]*4672 / [*3] / [*1].
-    void evaluate(const uint64_t* planes_words, const float* scalars,
+    // Evaluate up to `n` positions (1 <= n <= batch_size_).
+    void evaluate(const uint64_t* planes_words, const float* scalars, int n,
                   std::vector<float>& policy_out, std::vector<float>& wdl_out,
                   std::vector<float>& material_out);
 

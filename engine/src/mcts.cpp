@@ -63,10 +63,8 @@ int Search::select_child(int node, std::vector<PathEntry>& path) {
     return best;
 }
 
-// Virtual-loss contract: descent subtracts VL from each traversed edge once.
-// backprop adds (contrib + VL) per traversed edge, compensating exactly.
 void Search::backprop(const std::vector<PathEntry>& path, float value_from_leaf_stm) {
-    float contrib = -value_from_leaf_stm;   // deepest edge: flip to parent perspective
+    float contrib = -value_from_leaf_stm;
     for (auto it = path.rbegin(); it != path.rend(); ++it) {
         Tree::Edge& e = tree_.edges(it->node)[it->edge];
         e.visits += 1;
@@ -75,28 +73,22 @@ void Search::backprop(const std::vector<PathEntry>& path, float value_from_leaf_
     }
 }
 
-void Search::make_task(const Position& leaf, const std::vector<Position>& walk,
-                       const std::vector<Move>& legal, int node_idx,
-                       const std::vector<PathEntry>& path,
-                       std::vector<int>& out_task_slots) {
+EvalTask Search::make_task(const Position& leaf, const std::vector<Position>& walk,
+                           const std::vector<Move>& legal, int node_idx,
+                           const std::vector<PathEntry>& path) {
     EvalTask t;
     t.moves.reserve(legal.size());
     t.priors.assign(legal.size(), 0.0f);
     for (const Move& m : legal) t.moves.push_back(pack_move(m));
     t.stm = leaf.stm;
+    t.root_stm = hist_->back().stm;
     t.path.reserve(path.size());
     for (const PathEntry& pe : path) t.path.emplace_back(pe.node, pe.edge);
 
-    // zero-copy encoding over (game history, search walk)
     t.enc = encode_position(leaf, *hist_, walk);
-
-    int slot = static_cast<int>(tasks_.size());
     t.node = node_idx;
-    tasks_.push_back(std::move(t));
     tree_.node(node_idx).state = Tree::ST_INFLIGHT;
-    tree_.node(node_idx).task_slot = slot;
-    ++live_tasks_;
-    out_task_slots.push_back(slot);
+    return t;
 }
 
 void Search::compensate_vl(const std::vector<PathEntry>& path) {
@@ -106,9 +98,11 @@ void Search::compensate_vl(const std::vector<PathEntry>& path) {
     }
 }
 
-void Search::descend_once(std::vector<int>& out_task_slots) {
-    std::vector<PathEntry> path;
-    std::vector<Position> walk;
+void Search::descend_once(std::vector<EvalTask>& out_tasks) {
+    thread_local std::vector<PathEntry> path;
+    thread_local std::vector<Position> walk;
+    path.clear();
+    walk.clear();
     int node = root_;
 
     auto cur = [&]() -> const Position& { return walk.empty() ? hist_->back() : walk.back(); };
@@ -121,13 +115,12 @@ void Search::descend_once(std::vector<int>& out_task_slots) {
             return;
         }
         if (n.state == Tree::ST_INFLIGHT) {
-            // Aborted descent: undo VL, do NOT count visits or values.
             compensate_vl(path);
             return;
         }
         if (n.state == Tree::ST_UNEXPANDED) {
             const Position& leaf = cur();
-            thread_local std::vector<Move> legal;   // reused scratch, no realloc churn
+            thread_local std::vector<Move> legal;
             legal.clear();
             gen_legal_moves(leaf, legal);
             if (legal.empty()) {
@@ -135,16 +128,14 @@ void Search::descend_once(std::vector<int>& out_task_slots) {
                     leaf, leaf.king_sq(static_cast<Color>(leaf.stm)),
                     static_cast<Color>(leaf.stm ^ 1), leaf.occ());
                 n.state = Tree::ST_TERMINAL;
-                n.term_value = check ? -1.0f : 0.0f;   // stm is mated : stalemate
+                n.term_value = check ? -1.0f : draw_value();
                 backprop(path, n.term_value);
                 return;
             }
-            make_task(leaf, walk, legal, node, path, out_task_slots);
-            // no backprop here: complete_task will count this playout
+            out_tasks.push_back(make_task(leaf, walk, legal, node, path));
             return;
         }
 
-        // EXPANDED: select and descend one level
         int ei = select_child(node, path);
         Tree::Edge& e = tree_.edges(node)[ei];
         e.value_sum -= cfg_.virtual_loss;
@@ -153,33 +144,25 @@ void Search::descend_once(std::vector<int>& out_task_slots) {
 
         Position next = make_move(cur(), unpack_move(e.move));
 
-        if (cfg_.use_twofold_draw && next.hash == cur().hash) {
-            // immediate repetition of the current position
-            Tree::Node& cn = tree_.node(e.child);
-            cn.state = Tree::ST_TERMINAL;
-            cn.term_value = 0.0f;
-            backprop(path, 0.0f);   // includes this edge
-            return;
-        }
         if (cfg_.use_twofold_draw) {
             int seen = 0;
             for (const Position& p : *hist_)
                 if (p.hash == next.hash) ++seen;
             for (const Position& p : walk)
                 if (p.hash == next.hash) ++seen;
-            if (seen >= 2) {
+            if (seen >= 1) {   // was >= 2 (threefold); this is a search-internal twofold prune
                 Tree::Node& cn = tree_.node(e.child);
                 cn.state = Tree::ST_TERMINAL;
-                cn.term_value = 0.0f;
-                backprop(path, 0.0f);
+                cn.term_value = draw_value_for(next.stm);
+                backprop(path, cn.term_value);
                 return;
             }
         }
         if (next.halfmove >= 100) {
             Tree::Node& cn = tree_.node(e.child);
             cn.state = Tree::ST_TERMINAL;
-            cn.term_value = 0.0f;
-            backprop(path, 0.0f);
+            cn.term_value = draw_value_for(next.stm);
+            backprop(path, cn.term_value);
             return;
         }
 
@@ -188,9 +171,9 @@ void Search::descend_once(std::vector<int>& out_task_slots) {
     }
 }
 
-void Search::gather_round(int max_leaves, std::vector<int>& out_task_slots) {
+void Search::gather_round(int max_leaves, std::vector<EvalTask>& out_tasks) {
     for (int i = 0; i < max_leaves; ++i)
-        descend_once(out_task_slots);
+        descend_once(out_tasks);
 }
 
 void Search::maybe_noise_root() {
@@ -215,13 +198,10 @@ void Search::maybe_noise_root() {
     n.noised = 1;
 }
 
-void Search::complete_task(int slot) {
-    EvalTask& t = tasks_[slot];
+void Search::complete_task(EvalTask&& t) {
     Tree::Node& n = tree_.node(t.node);
-    if (n.state != Tree::ST_INFLIGHT) return;   // defensive
-    --live_tasks_;
+    if (n.state != Tree::ST_INFLIGHT) return;
 
-    // materialize children with evaluated priors
     std::vector<Tree::Edge> es;
     es.reserve(t.moves.size());
     for (size_t i = 0; i < t.moves.size(); ++i) {
@@ -240,7 +220,6 @@ void Search::complete_task(int slot) {
 
     if (t.node == root_) maybe_noise_root();
 
-    // fold this playout's value into the tree along its recorded path
     std::vector<PathEntry> path;
     path.reserve(t.path.size());
     for (const auto& [nd, ed] : t.path) path.push_back({nd, ed});
@@ -258,10 +237,6 @@ Search::Choice Search::pick_move(std::mt19937_64& rng, int ply_in_game) {
     for (int i = 0; i < n.num; ++i) { visits[i] = es[i].visits; total += visits[i]; }
 
     int pick = -1;
-
-    // 1) opening plies: sample the (Dirichlet-noised) prior distribution.
-    //    Priors are already noise-mixed at the root (maybe_noise_root runs on
-    //    every new root), so this inherits exploration for free.
     if (ply_in_game < cfg_.prior_plies) {
         uint32_t ptot = 0;
         for (int i = 0; i < n.num; ++i) ptot += es[i].prior;
@@ -276,7 +251,6 @@ Search::Choice Search::pick_move(std::mt19937_64& rng, int ply_in_game) {
         }
     }
 
-    // 2) early middle-game: sample by visit counts
     if (pick < 0 && ply_in_game < cfg_.temperature_plies && total > 0) {
         std::uniform_int_distribution<uint32_t> dist(1, total);
         uint32_t roll = dist(rng);
@@ -287,12 +261,11 @@ Search::Choice Search::pick_move(std::mt19937_64& rng, int ply_in_game) {
         if (pick < 0) pick = n.num - 1;
     }
 
-    // 3) greedy by visits
     if (pick < 0) {
         uint32_t bestv = 0;
         for (int i = 0; i < n.num; ++i)
             if (visits[i] > bestv) { bestv = visits[i]; pick = i; }
-        if (pick < 0) pick = 0;   // all-zero fallback (shouldn't happen)
+        if (pick < 0) pick = 0;
     }
 
     ch.move = es[pick].move;
@@ -305,23 +278,15 @@ void Search::apply_root_move(uint16_t packed_move, int child_node) {
     Position np = make_move(hist_->back(), unpack_move(packed_move));
     hist_->push_back(std::move(np));
 
-    // Reuse only fully-expanded subtrees: INFLIGHT children hold tasks that would
-    // be orphaned by tasks_.clear(), wedging the new root in ST_INFLIGHT forever.
-    bool reuse = false;
-    if (child_node >= 0 && tree_.node(child_node).state == Tree::ST_EXPANDED) {
-        root_ = child_node;
-        reuse = true;
-    }
-    if (!reuse) {
+    bool reuse = (child_node >= 0 && tree_.node(child_node).state == Tree::ST_EXPANDED);
+    if (reuse) {
+        tree_.keep_subtree(child_node);
+        root_ = 0;   // keep_subtree always relabels the retained root to index 0
+        maybe_noise_root();
+    } else {
         tree_.clear();
         root_ = tree_.new_node();
     }
-    tasks_.clear();
-    live_tasks_ = 0;
-    // Fresh root noise at every move. Reused (already-expanded) roots never get
-    // an evaluation task of their own, so without this they'd play the whole
-    // move with un-noised priors.
-    if (reuse) maybe_noise_root();
 }
 
 void Search::root_visit_distribution(std::vector<std::pair<int, int>>& out) const {
@@ -332,6 +297,46 @@ void Search::root_visit_distribution(std::vector<std::pair<int, int>>& out) cons
     for (int i = 0; i < n.num; ++i)
         if (es[i].policy_idx >= 0 && es[i].visits > 0)
             out.emplace_back(es[i].policy_idx, static_cast<int>(es[i].visits));
+}
+
+void Tree::keep_subtree(int new_root) {
+    std::vector<Node> nn;
+    std::vector<Edge> ne;
+    nn.reserve(nodes_.size() / 4 + 64);
+    ne.reserve(edges_.size() / 4 + 64);
+
+    std::vector<int> old2new(nodes_.size(), -1);
+    std::vector<int> stack;
+    old2new[new_root] = 0;
+    nn.push_back(nodes_[new_root]);
+    stack.push_back(new_root);
+
+    while (!stack.empty()) {
+        int o = stack.back();
+        stack.pop_back();
+        int mapped = old2new[o];
+        Node cp = nodes_[o];
+        if (cp.num > 0) {
+            const Edge* old_es = edges_.data() + cp.first;
+            int32_t first_new = static_cast<int32_t>(ne.size());
+            for (int i = 0; i < cp.num; ++i) {
+                Edge e = old_es[i];
+                if (e.child >= 0) {
+                    if (old2new[e.child] < 0) {
+                        old2new[e.child] = static_cast<int>(nn.size());
+                        nn.push_back(nodes_[e.child]);
+                        stack.push_back(e.child);
+                    }
+                    e.child = old2new[e.child];
+                }
+                ne.push_back(e);
+            }
+            cp.first = first_new;
+        }
+        nn[mapped] = cp;
+    }
+    nodes_.swap(nn);
+    edges_.swap(ne);
 }
 
 }  // namespace chess

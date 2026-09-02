@@ -93,6 +93,14 @@ class ShardDataset:
             self.counts.append(len(arr))
             self.ledger[sp] = 0
             new_pos += len(arr)
+            # keep the just-decompressed array: _records() would otherwise
+            # decompress the same shard a second time on first use
+            new_idx = len(self.files) - 1
+            self._cache[new_idx] = arr
+            self._cache_order.append(new_idx)
+            while len(self._cache_order) > self.max_cache:
+                old = self._cache_order.pop(0)
+                self._cache.pop(old, None)
 
         # enforce replay window: keep NEWEST shards while under budget.
         # self.files is sorted oldest-first, so walk from the end backwards.
@@ -170,23 +178,22 @@ class ShardDataset:
             tot = visits.sum(axis=1, keepdims=True)
             tot[tot == 0] = 1.0
             dist = visits / tot
-            rows = np.arange(len(sel))
-            idx_cols = pairs[:, :, 0]
-            for j in range(len(sel)):
-                m = valid[j]
-                pol_b[sel[j], idx_cols[j][m]] = dist[j][m]
+
+            # Vectorized scatter:
+            sel_arr = np.asarray(sel, dtype=np.int64)
+            cols = pairs[:, :, 0].astype(np.int64)
+            flat_indices = sel_arr[:, None] * ACTIONS + cols
+            pol_b.reshape(-1)[flat_indices[valid]] = dist[valid]
 
             results = chunk["result"].astype(np.int64)
             one_hot = np.zeros((len(sel), 3), dtype=np.float32)
             one_hot[np.arange(len(sel)), results] = 1.0
-            # global result -> side-to-move perspective (engine stores stm byte)
             stm_black = chunk["stm"].astype(bool)
             wdl = one_hot.copy()
             wdl[stm_black, 0], wdl[stm_black, 2] = (
                 one_hot[stm_black, 2].copy(), one_hot[stm_black, 0].copy())
             wdl_b[sel] = wdl
 
-            # material is already stored from the stm perspective
             mat_b[sel] = _f16_bits_to_float(chunk["material_f16"])
 
         return {

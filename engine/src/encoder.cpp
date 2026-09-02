@@ -22,11 +22,10 @@ EncodedPosition encode_position(const Position& current,
                                 const std::vector<Position>& walk) {
     EncodedPosition e;
 
-    // repetition count of the current position within game history + walk
     int rep_extra = 0;
     {
         uint64_t h = current.hash;
-        int seen = -1;   // subtract the final occurrence (the position itself)
+        int seen = -1;
         for (const Position& p : game_hist)
             if (p.hash == h) ++seen;
         for (const Position& p : walk)
@@ -34,33 +33,28 @@ EncodedPosition encode_position(const Position& current,
         rep_extra = std::max(seen, 0);
     }
 
-    // combined sequence length = game_hist + walk (current == last of walk, or
-    // last of game_hist when walk is empty)
-    const size_t total_len = game_hist.size() + walk.size();
     auto at = [&](size_t idx_from_end) -> const Position* {
-        // idx 0 = most recent (the current leaf)
         if (idx_from_end < walk.size())
             return &walk[walk.size() - 1 - idx_from_end];
-        size_t gi = walk.size() + idx_from_end;
-        if (gi < game_hist.size()) return &game_hist[game_hist.size() - 1 - (gi - walk.size())];
+        const size_t k = idx_from_end - walk.size();
+        if (k < game_hist.size())
+            return &game_hist[game_hist.size() - 1 - k];
         return nullptr;
     };
 
     for (int a = 0; a < HIST_STEPS; ++a) {
         const int base = a * PLANES_PER_AGE;
         const Position* p = at(static_cast<size_t>(a));
-        if (!p) continue;                       // no such history: planes stay zero
+        if (!p) continue;
 
         for (int pc = 0; pc < 12; ++pc) e.planes[base + pc] = p->bb[pc];
         e.planes[base + 12] = 0;
         e.planes[base + 13] = 0;
     }
 
-    // repetition flags only ever apply to the CURRENT position's plane block
     if (rep_extra >= 1) e.planes[12] = ~0ULL;
     if (rep_extra >= 2) e.planes[13] = ~0ULL;
 
-    // en-passant target square (plane 112)
     if (current.ep >= 0) e.planes[EP_PLANE] = 1ULL << current.ep;
     else e.planes[EP_PLANE] = 0;
 

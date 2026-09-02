@@ -30,6 +30,7 @@ class SelfPlayCfg:
     fast_visits: int = 96
     full_visits: int = 512
     fast_prob: float = 0.75
+    min_fresh_visits: int = 0          # Minimum newly searched visits required per move
     leaves_per_round: int = 16
     temperature_plies: int = 30
     prior_plies: int = 10              # sample first N plies from (noised) prior

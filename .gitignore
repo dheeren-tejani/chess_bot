@@ -1,4 +1,3 @@
-1712.01815v1.pdf
 __pycache__/
 .pytest_cache/
 checkpoints/
@@ -10,4 +9,5 @@ models/
 third_party/
 chessbot.log
 wandb/
-all_code/
+local/
+match_pgns/

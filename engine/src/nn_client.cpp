@@ -13,12 +13,9 @@ struct NNEvaluator::Impl {
     std::optional<Ort::Session> session;
     int batch = 0;
 
-    // cached io names
     const char* in_names[2] = {"planes", "scalars"};
     const char* out_names[3] = {"policy", "wdl", "material"};
 
-    // reusable host buffers
-    std::vector<float> plane_floats;      // [B*112*64]
     Ort::MemoryInfo mem{Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)};
 };
 
@@ -33,7 +30,7 @@ bool NNEvaluator::load(const std::string& onnx_path, int batch_size, bool prefer
         batch_size_ = batch_size;
 
         Ort::SessionOptions so;
-        so.SetIntraOpNumThreads(2);
+        so.SetIntraOpNumThreads(prefer_gpu ? 1 : 2);
         so.SetInterOpNumThreads(1);
         so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
@@ -42,19 +39,17 @@ bool NNEvaluator::load(const std::string& onnx_path, int batch_size, bool prefer
             try {
                 OrtCUDAProviderOptions opts{};
                 opts.device_id = 0;
-                opts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchHeuristic;
+                opts.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
                 so.AppendExecutionProvider_CUDA(opts);
                 gpu_ = true;
             } catch (const Ort::Exception& e) {
                 if (err) *err = std::string("CUDA EP unavailable: ") + e.what();
-                gpu_ = false;   // fall through to CPU
+                gpu_ = false;
             }
         }
 
         impl_->session.emplace(impl_->env, onnx_path.c_str(), so);
 
-        // sanity-check io signature AND input shapes against current encoder
-        Ort::AllocatorWithDefaultOptions alloc;
         auto in_count = impl_->session->GetInputCount();
         auto out_count = impl_->session->GetOutputCount();
         if (in_count != 2 || out_count != 3)
@@ -62,30 +57,30 @@ bool NNEvaluator::load(const std::string& onnx_path, int batch_size, bool prefer
 
         {
             auto planes_meta = impl_->session->GetInputTypeInfo(0);
-            auto planes_t = planes_meta.GetTensorTypeAndShapeInfo();
-            auto dims = planes_t.GetShape();
-            if (dims.size() != 4 || dims[1] != NUM_PLANES) {
+            auto dims = planes_meta.GetTensorTypeAndShapeInfo().GetShape();
+            // Expected shape from BitPackedInput wrapper: [Batch, 113, 8]
+            if (dims.size() != 3 || dims[1] != NUM_PLANES || dims[2] != 8) {
                 std::ostringstream os;
-                os << "model 'planes' input expects "
-                   << (dims.size() > 1 && dims[1] > 0 ? dims[1] : -1)
-                   << " plane channels but this engine build encodes " << NUM_PLANES
-                   << " - the onnx file is stale; delete it and re-export/bootstrap";
+                os << "model planes mismatch: expected shape [?, " << NUM_PLANES << ", 8]";
                 throw std::runtime_error(os.str());
             }
             auto scalars_meta = impl_->session->GetInputTypeInfo(1);
-            auto scalars_t = scalars_meta.GetTensorTypeAndShapeInfo();
-            auto sdims = scalars_t.GetShape();
+            auto sdims = scalars_meta.GetTensorTypeAndShapeInfo().GetShape();
             if (sdims.size() != 2 || sdims[1] != SCALAR_COUNT) {
-                std::ostringstream os;
-                os << "model 'scalars' input expects "
-                   << (sdims.size() > 1 && sdims[1] > 0 ? sdims[1] : -1)
-                   << " features but this engine build encodes " << SCALAR_COUNT
-                   << " - stale onnx file";
-                throw std::runtime_error(os.str());
+                throw std::runtime_error("model scalars mismatch");
             }
         }
 
-        impl_->plane_floats.assign(static_cast<size_t>(batch_size_) * NUM_PLANES * 64, 0.f);
+        // Warmup forward pass
+        {
+            std::vector<uint64_t> dummy_planes(
+                static_cast<size_t>(batch_size_) * NUM_PLANES, 0ULL);
+            std::vector<float> dummy_scalars(
+                static_cast<size_t>(batch_size_) * SCALAR_COUNT, 0.f);
+            std::vector<float> p, w, m;
+            evaluate(dummy_planes.data(), dummy_scalars.data(), batch_size_, p, w, m);
+        }
+
         return true;
     } catch (const std::exception& e) {
         if (err) *err = e.what();
@@ -94,31 +89,23 @@ bool NNEvaluator::load(const std::string& onnx_path, int batch_size, bool prefer
     }
 }
 
-void NNEvaluator::evaluate(const uint64_t* planes_words, const float* scalars,
+void NNEvaluator::evaluate(const uint64_t* planes_words, const float* scalars, int n,
                            std::vector<float>& policy_out, std::vector<float>& wdl_out,
                            std::vector<float>& material_out) {
+    if (n <= 0) return;
+    n = std::min(n, batch_size_);
     Impl& I = *impl_;
-    const int B = batch_size_;
 
-    // unpack bit-planes to floats: [B][112][64]
-    for (int b = 0; b < B; ++b) {
-        float* dst = I.plane_floats.data() + static_cast<size_t>(b) * NUM_PLANES * 64;
-        const uint64_t* src = planes_words + static_cast<size_t>(b) * NUM_PLANES;
-        for (int p = 0; p < NUM_PLANES; ++p) {
-            uint64_t w = src[p];
-            float* d = dst + static_cast<size_t>(p) * 64;
-            for (int s = 0; s < 64; ++s)
-                d[s] = static_cast<float>((w >> s) & 1ULL);
-        }
-    }
+    // Direct uint8 view over planes_words (8 bytes per uint64) -> [n, 113, 8]
+    std::array<int64_t, 3> plane_shape{n, NUM_PLANES, 8};
+    std::array<int64_t, 2> scalar_shape{n, SCALAR_COUNT};
 
-    std::array<int64_t, 4> plane_shape{B, NUM_PLANES, 8, 8};
-    std::array<int64_t, 2> scalar_shape{B, SCALAR_COUNT};
-
-    Ort::Value plane_tensor = Ort::Value::CreateTensor<float>(
-        I.mem, I.plane_floats.data(), I.plane_floats.size(), plane_shape.data(), 4);
+    Ort::Value plane_tensor = Ort::Value::CreateTensor<uint8_t>(
+        I.mem, const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(planes_words)),
+        static_cast<size_t>(n) * NUM_PLANES * 8, plane_shape.data(), 3);
+        
     Ort::Value scalar_tensor = Ort::Value::CreateTensor<float>(
-        I.mem, const_cast<float*>(scalars), static_cast<size_t>(B) * SCALAR_COUNT,
+        I.mem, const_cast<float*>(scalars), static_cast<size_t>(n) * SCALAR_COUNT,
         scalar_shape.data(), 2);
 
     const char* ins[] = {I.in_names[0], I.in_names[1]};
@@ -126,15 +113,16 @@ void NNEvaluator::evaluate(const uint64_t* planes_words, const float* scalars,
     Ort::Value inputs[] = {std::move(plane_tensor), std::move(scalar_tensor)};
     auto outputs = I.session->Run(Ort::RunOptions{nullptr}, ins, inputs, 2, outs, 3);
 
-    policy_out.resize(static_cast<size_t>(B) * POLICY_ACTIONS);
-    wdl_out.resize(static_cast<size_t>(B) * 3);
-    material_out.resize(B);
+    policy_out.resize(static_cast<size_t>(n) * POLICY_ACTIONS);
+    wdl_out.resize(static_cast<size_t>(n) * 3);
+    material_out.resize(n);
+
     std::memcpy(policy_out.data(), outputs[0].GetTensorMutableData<float>(),
-                sizeof(float) * B * POLICY_ACTIONS);
+                sizeof(float) * n * POLICY_ACTIONS);
     std::memcpy(wdl_out.data(), outputs[1].GetTensorMutableData<float>(),
-                sizeof(float) * B * 3);
+                sizeof(float) * n * 3);
     std::memcpy(material_out.data(), outputs[2].GetTensorMutableData<float>(),
-                sizeof(float) * B);
+                sizeof(float) * n);
 }
 
 }  // namespace chess

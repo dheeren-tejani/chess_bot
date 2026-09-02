@@ -210,6 +210,7 @@ class Orchestrator:
             "--fast-visits", str(c.fast_visits),
             "--full-visits", str(c.full_visits),
             "--fast-prob", str(c.fast_prob),
+            "--min-fresh-visits", str(c.min_fresh_visits),
             "--leaves-per-round", str(c.leaves_per_round),
             "--temp-plies", str(c.temperature_plies),
             "--prior-plies", str(c.prior_plies),
@@ -402,13 +403,13 @@ class Orchestrator:
                 "gate_score": None,
                 "gate_elo": None,
                 "gate_se": None,
-                "anchor_score": res_a["score"],
-                "anchor_elo": res_a["elo"],
-                "anchor_se": res_a["se"],
-                "anchor_wins": res_a["wins"],
-                "anchor_draws": res_a["draws"],
-                "anchor_losses": res_a["losses"],
-                "champion_anchor_elo": res_a["elo"],
+                "anchor_score": None,
+                "anchor_elo": None,
+                "anchor_se": None,
+                "anchor_wins": None,
+                "anchor_draws": None,
+                "anchor_losses": None,
+                "champion_anchor_elo": None,
             }
             return
 
