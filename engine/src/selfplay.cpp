@@ -286,6 +286,7 @@ struct GameSlot {
     bool exhausted = false;
     bool resigned = false;
     int resign_streak = 0;
+    int resign_side = -1;
 };
 
 static bool conclude_move(SelfPlayConfig& cfg, GameSlot& g, std::mt19937_64& rng,
@@ -341,21 +342,30 @@ static bool conclude_move(SelfPlayConfig& cfg, GameSlot& g, std::mt19937_64& rng
         return true;
     }
 
-    // 3) Resignation check
+    // 3) Resignation check (per-side streak tracking)
     if (cfg.resign_enabled && g.ply >= cfg.resign_min_ply) {
-        float q = s.root_q();
+        float q = s.root_q(); // from current stm's perspective
         if (q < cfg.resign_threshold) {
-            ++g.resign_streak;
+            if (g.resign_side == static_cast<int>(cur.stm)) {
+                ++g.resign_streak;
+            } else {
+                g.resign_side = static_cast<int>(cur.stm);
+                g.resign_streak = 1;
+            }
+
             if (g.resign_streak >= cfg.resign_consecutive &&
                 std::uniform_real_distribution<float>(0.f, 1.f)(rng) >=
                     cfg.resign_continue_frac) {
+                // If White (0) resigns, Black (2) wins; if Black (1) resigns, White (0) wins
                 g.game.result = (cur.stm == WHITE) ? 2 : 0;
                 g.resigned = true;
                 *end_reason = "resign";
                 return true;
             }
-        } else {
+        } else if (g.resign_side == static_cast<int>(cur.stm)) {
+            // Only the streak's owner can reset their own streak
             g.resign_streak = 0;
+            g.resign_side = -1;
         }
     }
 
@@ -452,6 +462,7 @@ int run_selfplay(const std::string& model_path, const std::string& out_dir,
                 g.exhausted = false;
                 g.resigned = false;
                 g.resign_streak = 0;
+                g.resign_side = -1;
                 float roll = std::uniform_real_distribution<float>(0.f, 1.f)(rng);
                 g.budget = (roll < cfg.fast_prob) ? cfg.fast_visits : cfg.full_visits;
                 g.search->set_budget(g.budget);
@@ -632,7 +643,7 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
     attacks::init();
     MCTSConfig mc;
     mc.root_dirichlet = false;
-    mc.temperature_plies = 8;
+    mc.temperature_plies = 2;
 
     struct MatchGame {
         std::unique_ptr<Search> search;

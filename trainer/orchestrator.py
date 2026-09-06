@@ -239,8 +239,9 @@ class Orchestrator:
                         el = obj["elapsed_s"]
                         eta = (el / max(obj["games"], 1)) * max(
                             c.games_per_phase - obj["games"], 0)
+                        last_bsz = obj.get("last_batch_size", obj.get("last_bsz", 0))
                         print(f"[selfplay] {obj['games']}/{c.games_per_phase} games | "
-                              f"{obj['evals_per_s']:.0f} evals/s | "
+                              f"{obj['evals_per_s']:.0f} evals/s (batch {last_bsz:3d}) | "
                               f"{obj['games_per_h']:.0f} g/h | ETA {eta/60:.0f}m")
                 except Exception:
                     pass

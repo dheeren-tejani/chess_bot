@@ -128,7 +128,7 @@ void Search::descend_once(std::vector<EvalTask>& out_tasks) {
                     leaf, leaf.king_sq(static_cast<Color>(leaf.stm)),
                     static_cast<Color>(leaf.stm ^ 1), leaf.occ());
                 n.state = Tree::ST_TERMINAL;
-                n.term_value = check ? -1.0f : draw_value();
+                n.term_value = check ? -1.0f : draw_value_for(leaf.stm);
                 backprop(path, n.term_value);
                 return;
             }

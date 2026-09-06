@@ -24,8 +24,8 @@ selfplay:
   fast_prob: 0.70
   min_fresh_visits: 64          # Guarantees fresh exploration at every ply
   leaves_per_round: 32          # more in-flight leaves per game -> fuller GPU batches
-  temperature_plies: 40
-  prior_plies: 20               # chaos window: ~40 random-ish plies create the imbalances
+  temperature_plies: 30
+  prior_plies: 10               # chaos window: ~40 random-ish plies create the imbalances
                                 # that contempt + material-seed then convert (validated: 16.7%
                                 # decisive vs 5% at prior 16/temp 30, Exp-G)
   max_plies: 300                # long enough for the material adjudication to matter
@@ -38,13 +38,13 @@ selfplay:
   contempt: 0.40                # search-side draw value < 0.5: both players avoid sterile
                                 # draws; training labels stay honest 0.5. Raise toward 0.5
                                 # as decisive rate climbs.
-  resign_enabled: false          # ON: value net discriminates now (v_acc ~0.95). Breaks the
+  resign_enabled: true          # ON: value net discriminates now (v_acc ~0.95). Breaks the
                                 # "losing side shuffles to threefold" pattern -> decisive labels
-  resign_threshold: -0.95
+  resign_threshold: -0.85
   resign_consecutive: 2
-  resign_continue_frac: 0.10    # keep playing 10% of resignable games (false-positive guard)
-  resign_min_ply: 30
-  shard_games: 24
+  resign_continue_frac: 0.15    # keep playing 10% of resignable games (false-positive guard)
+  resign_min_ply: 45
+  shard_games: 128
   seed: 1
 
 train:
