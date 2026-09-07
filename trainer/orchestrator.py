@@ -324,11 +324,8 @@ class Orchestrator:
 
     def phase_train(self):
         """Returns 'ok' | 'insufficient' (caller decides next phase)."""
-        # Same replay window the trainer will use - otherwise this outer check
-        # passes while the trainer's windowed dataset comes back empty (the
-        # insufficient_data spin-loop of the first run).
         ds = ShardDataset(str(self.data_dir),
-                          max_cache_shards=self.cfg.train.cache_shards,
+                          cache_bytes=self.cfg.train.cache_bytes,
                           window_positions=self.cfg.train.replay_window)
         have = len(ds)
         if ds.refresh():
@@ -442,6 +439,21 @@ class Orchestrator:
                               "anchor_score": None, "anchor_elo": None, "anchor_se": None,
                               "champion_anchor_elo": None}
             return
+
+        # --- ADD THIS CADENCE CHECK ---
+        it = self.state["iterations"]
+        every_n = getattr(self.cfg.gate, "every_n_iterations", 10)
+        if it % every_n != 0:
+            print(f"[gate] skipping match (iter {it} % {every_n} != 0) -> promoting candidate unconditionally")
+            self.candidate.replace(self.champion)
+            champ_anchor = self.state.get("champion_anchor") or {"score": 0.5, "elo": 0.0}
+            self.last_gate = {
+                "gate_score": None, "gate_elo": None, "gate_se": None,
+                "anchor_score": None, "anchor_elo": None, "anchor_se": None,
+                "champion_anchor_elo": champ_anchor.get("elo", 0.0),
+            }
+            return
+        # ------------------------------
 
         if c.measurement_only:
             # AlphaZero-faithful: single continually-updated network. The latest

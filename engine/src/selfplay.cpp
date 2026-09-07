@@ -761,12 +761,26 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
             int wait_ms = 0;
             for (;;) {
                 ready.clear();
-                size_t got = batch_a.drain_wait(t, ready, wait_ms);
+            
+                // Check which batchers this worker currently has in-flight tasks for
+                bool waiting_a = false, waiting_b = false;
+                for (const auto& g : slots) {
+                    if (!g.search || g.exhausted || g.inflight == 0) continue;
+                    const bool a_moves = ((g.search->root_position().stm == WHITE) == g.a_is_white);
+                    if (a_moves) waiting_a = true;
+                    else waiting_b = true;
+                }
+                
+                // 1. Wait on A only if we have tasks for A
+                size_t got = batch_a.drain_wait(t, ready, waiting_a ? wait_ms : 0);
                 {
                     std::vector<EvalBatcher::Item> rb;
-                    got += batch_b.drain_wait(t, rb, 0);
+                    // 2. Wait on B ONLY if we have tasks for B AND we didn't already receive items from A
+                    int wait_b = (waiting_b && got == 0) ? wait_ms : 0;
+                    got += batch_b.drain_wait(t, rb, wait_b);
                     ready.insert(ready.end(), std::make_move_iterator(rb.begin()), std::make_move_iterator(rb.end()));
                 }
+
                 for (auto& item : ready) {
                     for (auto& g : slots) {
                         if (!g.search || g.exhausted) continue;
@@ -827,10 +841,10 @@ std::string run_match(const std::string& model_a, const std::string& model_b,
                             continue;
                         }
                     }
-                    if (static_cast<int>(g.search->root_visits() + g.inflight) < visits + 16) {
+                    if (static_cast<int>(g.search->root_visits() + g.inflight) < visits + 32) {
                         std::vector<EvalTask> ts;
-                        ts.reserve(16);
-                        g.search->gather_round(16, ts);
+                        ts.reserve(32);
+                        g.search->gather_round(32, ts);
                         if (!ts.empty()) {
                             const bool a_moves =
                                 ((g.search->root_position().stm == WHITE) ==

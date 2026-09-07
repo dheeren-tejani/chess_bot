@@ -85,7 +85,7 @@ class TrainCfg:
     wdl_shape_fade_span_steps: int = 40000
     checkpoint_every_steps: int = 400
     keep_last_checkpoints: int = 3
-    cache_shards: int = 256          # RAM-cached shards for the trainer dataset
+    cache_bytes: int = 3_000_000_000
 
 
 @dataclass
@@ -99,6 +99,7 @@ class GateCfg:
     # measurement of absolute progress. Eliminates promotion shocks and the
     # stale-champion stall.
     measurement_only: bool = False
+    every_n_iterations: int = 10
     games: int = 24
     visits: int = 160
     batch_size: int = 128

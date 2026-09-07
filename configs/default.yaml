@@ -50,7 +50,7 @@ selfplay:
 train:
   steps_per_phase: 2400         # 1200 was underfitting: ~1.5 epochs/iteration while
                                 # self-play data outpaced learning (iter 0-6 stall)
-  batch_size: 512
+  batch_size: 768
   lr: 1.0e-3
   weight_decay: 1.0e-4
   warmup_steps: 100
@@ -67,19 +67,19 @@ train:
   checkpoint_every_steps: 400
   keep_last_checkpoints: 3
   replay_window: 1500000        # ~10 iterations of replay: fresher data + cache fits RAM
-  cache_shards: 500             # ~1.3GB RAM; ~70% hit rate at the 1.5M window (was 256/3M
-                                # = 29% -> gzip thrash made training 20x slower)
+  cache_bytes: 3000000000
 
 gate:
   enabled: true
   measurement_only: true   # AlphaZero-faithful (paper p.3): single continually-updated
                            # net - no promotion gate, self-play always uses the freshest
                            # export; anchor match is measurement only
+  every_n_iterations: 10
   games: 160               # enough that +/-1 se (~7 Elo) can't flunk/promote real changes
   visits: 160
   batch_size: 512
   threads: 8
-  games_per_worker: 4
+  games_per_worker: 6
   min_score: 0.55     # (unused in measurement_only mode)
   force_promote_after: 4
   anchor_model: models/anchor.onnx  # frozen random-init net; NEVER overwritten

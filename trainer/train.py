@@ -232,9 +232,10 @@ class RichTrainer:
 
     def train_phases(self, phases: int = 1) -> dict:
         ds = ShardDataset(str(self.root / self.cfg.run.data_dir),
-                          max_cache_shards=self.cfg.train.cache_shards,
+                          cache_bytes=self.cfg.train.cache_bytes,
                           window_positions=self.cfg.train.replay_window)
         ds.refresh()
+        ds.prewarm(workers=8)  # Parallel decompress to fill cache once at startup
         if len(ds) < self.cfg.train.min_positions_to_start:
             return {"status": "insufficient_data",
                     "positions": len(ds),

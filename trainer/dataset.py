@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import gzip
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -50,61 +51,67 @@ def planes_to_tensor(words: np.ndarray) -> torch.Tensor:
 
 
 class ShardDataset:
-    """Dataset over engine shards with consumed-position ledger for exact resume."""
+    """Dataset over engine shards with consumed-position ledger for exact resume.
 
-    def __init__(self, data_dir: str, max_cache_shards: int = 256,
+    - refresh() never decompresses: position counts come from the 20-byte header
+      plus the gzip ISIZE footer (uncompressed length mod 2^32).
+    - Records are decompressed lazily into a path-keyed, byte-budgeted LRU cache.
+    - Window trimming only evicts dropped files rather than flushing the entire cache.
+    """
+
+    def __init__(self, data_dir: str, cache_bytes: int = 3_000_000_000,
                  window_positions: int | None = None):
         self.data_dir = Path(data_dir)
         self.files: list[Path] = []
         self.counts: list[int] = []
         self.ledger: dict[str, int] = {}          # path -> positions consumed
-        self._cache: dict[int, np.ndarray] = {}
-        self._cache_order: list[int] = []
-        self.max_cache = max_cache_shards
-        # Replay window: keep only the newest `window_positions` positions
-        # (AlphaZero-style freshness bias). None = keep everything.
+        self._cache: dict[str, np.ndarray] = {}   # path(str) -> records
+        self._cache_order: list[str] = []         # LRU list of paths (oldest first)
+        self._cache_bytes = 0
+        self.max_cache_bytes = cache_bytes
         self.window_positions = window_positions
 
-    def refresh(self) -> int:
-        """Pick up newly completed shards (recursive: per-iteration dirs).
+    @staticmethod
+    def _shard_positions(p: Path) -> int | None:
+        """Read record count without decompressing the entire file."""
+        try:
+            # Check 20-byte header for magic bytes
+            with gzip.open(p, "rb") as f:
+                header = f.read(20)
+            if len(header) < 20 or header[:4] != b"CBSP":
+                return None
 
-        The engine publishes shards via tmp-file + atomic rename, so any *.gz
-        found here is complete. *.tmp leftovers from crashed writers don't match
-        the *.gz glob; skipped defensively anyway.
-        """
+            # Read uncompressed size (ISIZE) from the last 4 bytes of the gzip file
+            with open(p, "rb") as f:
+                f.seek(-4, 2)  # 2 is os.SEEK_END
+                (usize,) = struct.unpack("<I", f.read(4))
+
+            usable = usize - 20
+            if usable < 0 or usable % RECORD_BYTES != 0:
+                return None
+            return usable // RECORD_BYTES
+        except Exception:
+            return None
+
+    def refresh(self) -> int:
+        """Pick up newly completed shards using quick header/footer checks."""
         new_pos = 0
         known = {str(p) for p in self.files}
         for p in sorted(self.data_dir.rglob("*.gz")):
             sp = str(p)
             if sp in known or sp.endswith(".tmp"):
                 continue
-            try:
-                with gzip.open(p, "rb") as f:
-                    header = f.read(20)
-                if len(header) < 20 or header[:4] != b"CBSP":
-                    continue
-                _, num_games = struct.unpack("<II", header[4:12])
-                arr = self._load_array(p)
-            except Exception:
-                continue   # file still being written / truncated
-            if len(arr) == 0:
-                continue
-            self.files.append(p)
-            self.counts.append(len(arr))
-            self.ledger[sp] = 0
-            new_pos += len(arr)
-            # keep the just-decompressed array: _records() would otherwise
-            # decompress the same shard a second time on first use
-            new_idx = len(self.files) - 1
-            self._cache[new_idx] = arr
-            self._cache_order.append(new_idx)
-            while len(self._cache_order) > self.max_cache:
-                old = self._cache_order.pop(0)
-                self._cache.pop(old, None)
 
-        # enforce replay window: keep NEWEST shards while under budget.
-        # self.files is sorted oldest-first, so walk from the end backwards.
-        # cut=0 default => if total < window, nothing is dropped.
+            n = self._shard_positions(p)
+            if not n:
+                continue
+
+            self.files.append(p)
+            self.counts.append(n)
+            self.ledger[sp] = 0
+            new_pos += n
+
+        # Enforce replay window: keep NEWEST shards
         if self.window_positions:
             acc = 0
             cut = 0
@@ -117,8 +124,15 @@ class ShardDataset:
                 dropped = self.files[:cut]
                 print(f"[dataset] replay window: dropping {len(dropped)} old "
                       f"shards ({sum(self.counts[:cut])} positions)")
-                self._cache.clear()   # indices shift -> simplest to flush cache
-                self._cache_order.clear()
+
+                # Selectively evict only the dropped files from the cache
+                dropped_set = {str(p) for p in dropped}
+                for sp in dropped_set:
+                    arr = self._cache.pop(sp, None)
+                    if arr is not None:
+                        self._cache_bytes -= arr.nbytes
+                self._cache_order = [sp for sp in self._cache_order if sp not in dropped_set]
+
                 self.files = self.files[cut:]
                 self.counts = self.counts[cut:]
         return new_pos
@@ -130,13 +144,41 @@ class ShardDataset:
         return np.frombuffer(data[20:20 + usable], dtype=REC_DTYPE)
 
     def _records(self, shard_idx: int) -> np.ndarray:
-        if shard_idx not in self._cache:
-            self._cache[shard_idx] = self._load_array(self.files[shard_idx])
-            self._cache_order.append(shard_idx)
-            while len(self._cache_order) > self.max_cache:
-                old = self._cache_order.pop(0)
-                self._cache.pop(old, None)
-        return self._cache[shard_idx]
+        sp = str(self.files[shard_idx])
+        arr = self._cache.get(sp)
+        if arr is None:
+            arr = self._load_array(self.files[shard_idx])
+            self._cache[sp] = arr
+            self._cache_order.append(sp)
+            self._cache_bytes += arr.nbytes
+
+            # Evict oldest shards until we are within byte budget
+            while self._cache_bytes > self.max_cache_bytes and len(self._cache_order) > 1:
+                old_sp = self._cache_order.pop(0)
+                old_arr = self._cache.pop(old_sp, None)
+                if old_arr is not None:
+                    self._cache_bytes -= old_arr.nbytes
+        return arr
+
+    def prewarm(self, workers: int = 8) -> None:
+        """Decompress window shards in parallel into RAM before training starts."""
+        todo = [p for p in self.files if str(p) not in self._cache]
+        if not todo:
+            return
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for p, arr in zip(todo, ex.map(self._load_array, todo)):
+                sp = str(p)
+                if sp in self._cache:
+                    continue
+                self._cache[sp] = arr
+                self._cache_order.append(sp)
+                self._cache_bytes += arr.nbytes
+
+        while self._cache_bytes > self.max_cache_bytes and len(self._cache_order) > 1:
+            old_sp = self._cache_order.pop(0)
+            old_arr = self._cache.pop(old_sp, None)
+            if old_arr is not None:
+                self._cache_bytes -= old_arr.nbytes
 
     def mark_consumed(self, shard_idx: int, n: int):
         self.ledger[str(self.files[shard_idx])] += n
