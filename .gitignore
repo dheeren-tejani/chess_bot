@@ -11,3 +11,6 @@ chessbot.log
 wandb/
 local/
 match_pgns/
+orchestrator_state.json
+.vscode/
+frontend/node_modules/

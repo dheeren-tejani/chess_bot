@@ -19,18 +19,18 @@ selfplay:
   threads: 12
   games_per_worker: 6
   batch_size: 512
-  fast_visits: 256
-  full_visits: 1024
+  fast_visits: 384
+  full_visits: 1536
   fast_prob: 0.70
   min_fresh_visits: 64          # Guarantees fresh exploration at every ply
   leaves_per_round: 32          # more in-flight leaves per game -> fuller GPU batches
-  temperature_plies: 30
-  prior_plies: 10               # chaos window: ~40 random-ish plies create the imbalances
+  temperature_plies: 24
+  prior_plies: 5               # chaos window: ~40 random-ish plies create the imbalances
                                 # that contempt + material-seed then convert (validated: 16.7%
                                 # decisive vs 5% at prior 16/temp 30, Exp-G)
   max_plies: 300                # long enough for the material adjudication to matter
   adjudicate_material_pawns: 3.0  # lowered from 4.0: conversions cross the decisive line sooner
-  value_material_alpha: 0.15     # cold-start: material head steers the search until WDL
+  value_material_alpha: 0.00     # cold-start: material head steers the search until WDL
                                 # discriminates (probe ev(queen-up) > ~0.7 -> 0.15 -> 0)
   use_twofold_draw: true        # BACK ON: with it off the search was BLIND to repetitions -
                                 # games drifted into threefolds invisibly. Now a repeat is a
@@ -42,7 +42,7 @@ selfplay:
                                 # "losing side shuffles to threefold" pattern -> decisive labels
   resign_threshold: -0.85
   resign_consecutive: 2
-  resign_continue_frac: 0.15    # keep playing 10% of resignable games (false-positive guard)
+  resign_continue_frac: 0.15    # keep playing 15% of resignable games (false-positive guard)
   resign_min_ply: 45
   shard_games: 128
   seed: 1
@@ -70,7 +70,7 @@ train:
   cache_bytes: 3000000000
 
 gate:
-  enabled: true
+  enabled: false
   measurement_only: true   # AlphaZero-faithful (paper p.3): single continually-updated
                            # net - no promotion gate, self-play always uses the freshest
                            # export; anchor match is measurement only
