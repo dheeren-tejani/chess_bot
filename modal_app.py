@@ -80,8 +80,6 @@ image = (
     timeout=3600,
     volumes={"/data": games_volume},
     secrets=[chess_secrets],
-    region=["ap"],              # Run containers in Asia-Pacific
-    routing_region="ap-south",
 )
 
 @modal.concurrent(max_inputs=10)

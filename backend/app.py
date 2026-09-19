@@ -385,6 +385,7 @@ def healthz():
         "backend": "cpp-uci",
         "engine_bin": ENGINE_BIN,
         "model": MODEL_PATH,
+        "version": os.environ.get("CHESS_BUILD_VERSION", "unknown"),
         "visits": VISITS,
         "movetime_ms": MOVETIME_MS,
     }

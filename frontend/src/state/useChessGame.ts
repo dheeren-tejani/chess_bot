@@ -387,7 +387,7 @@ async function botTurn() {
    Black's opening move while the loading screen is up, then enter the
    game. Every await re-checks the token so Cancel (goHome) discards it. */
 const MIN_LOADING_MS = 700;     // warm backends still get a readable transition
-const WAKE_BUDGET_MS = 30000;   // serverless cold-start budget
+const WAKE_BUDGET_MS = 120000;   // serverless cold-start budget
 
 async function orchestrateStart(token: number, color: 'w' | 'b') {
   const t0 = Date.now();
