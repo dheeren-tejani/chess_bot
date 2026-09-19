@@ -58,7 +58,7 @@ image = (
     # and we've placed the libs exactly where it expects them.
     .run_commands(
         "cd /root/engine && mkdir -p build && cd build && "
-        "cmake .. -DCMAKE_BUILD_TYPE=Release && "
+        "cmake .. -DCMAKE_BUILD_TYPE=Release -DPORTABLE_BUILD=ON && "
         "make -j$(nproc)"
     )
     .add_local_file("models/champion_fp32.onnx",

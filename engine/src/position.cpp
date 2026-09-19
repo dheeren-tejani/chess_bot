@@ -47,6 +47,17 @@ uint64_t slow_rook(int sq, uint64_t occ) {
     for (auto d : {Delta{0,1}, Delta{0,-1}, Delta{1,0}, Delta{-1,0}}) a |= slide(sq, d.df, d.dr, occ);
     return a & ~(1ULL << sq);
 }
+
+// BMI2 PEXT intrinsic wrapper. GCC refuses to compile `_pext_u64` unless the
+// target CPU supports BMI2, so this one function is tagged with the target
+// attribute to unlock the intrinsic. It is ONLY called from code paths that
+// have already verified `BMI2 == true` at runtime, so no SIGILL on hosts
+// without BMI2.
+__attribute__((target("bmi2")))
+inline uint64_t pext_bmi2(uint64_t val, uint64_t mask) {
+    return _pext_u64(val, mask);
+}
+
 }  // namespace
 
 void init() {
@@ -95,12 +106,12 @@ void init() {
         ROOK_MASK[sq] = rm;
         uint64_t bsub = bm;
         do {
-            BISHOP_TABLE[sq][_pext_u64(bsub, bm)] = slow_bishop(sq, bsub);
+            BISHOP_TABLE[sq][pext_bmi2(bsub, bm)] = slow_bishop(sq, bsub);
             bsub = (bsub - 1) & bm;
         } while (bsub != bm);
         uint64_t rsub = rm;
         do {
-            ROOK_TABLE[sq][_pext_u64(rsub, rm)] = slow_rook(sq, rsub);
+            ROOK_TABLE[sq][pext_bmi2(rsub, rm)] = slow_rook(sq, rsub);
             rsub = (rsub - 1) & rm;
         } while (rsub != rm);
     }
@@ -113,11 +124,11 @@ uint64_t pawn_attacks(Color c, int sq) { return PAWN_ATT[c][sq]; }
 uint64_t knight(int sq) { return KNIGHT_T[sq]; }
 uint64_t king(int sq) { return KING_T[sq]; }
 uint64_t bishop(int sq, uint64_t occ) {
-    if (BMI2) return BISHOP_TABLE[sq][_pext_u64(occ & BISHOP_MASK[sq], BISHOP_MASK[sq])];
+    if (BMI2) return BISHOP_TABLE[sq][pext_bmi2(occ & BISHOP_MASK[sq], BISHOP_MASK[sq])];
     return slow_bishop(sq, occ);  // portable fallback
 }
 uint64_t rook(int sq, uint64_t occ) {
-    if (BMI2) return ROOK_TABLE[sq][_pext_u64(occ & ROOK_MASK[sq], ROOK_MASK[sq])];
+    if (BMI2) return ROOK_TABLE[sq][pext_bmi2(occ & ROOK_MASK[sq], ROOK_MASK[sq])];
     return slow_rook(sq, occ);
 }
 uint64_t queen(int sq, uint64_t occ) { return bishop(sq, occ) | rook(sq, occ); }

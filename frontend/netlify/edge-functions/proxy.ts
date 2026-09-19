@@ -6,7 +6,7 @@
 const REQ_SKIP = new Set([
   "host", "connection", "content-length", "transfer-encoding",
   "keep-alive", "upgrade", "proxy-connection", "proxy-authorization",
-  "te", "trailer",
+  "te", "trailer","accept-encoding",
 ]);
 const RES_SKIP = new Set([
   "content-encoding", "content-length", "transfer-encoding",
@@ -55,6 +55,7 @@ export default async (request: Request, context: any) => {
     request.headers.forEach((v, k) => {
       if (!REQ_SKIP.has(k.toLowerCase())) headers.set(k, v);
     });
+    headers.set("accept-encoding", "identity");
     const secret = getEnv("PROXY_SECRET", context);
     if (secret) headers.set("x-gambit-proxy", secret);
 

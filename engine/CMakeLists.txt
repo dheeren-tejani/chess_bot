@@ -7,6 +7,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Portable build option: when ON, target x86-64-v2 (Nehalem, 2008) instead
+# of `native`. Required for containerized deploys where the build host and
+# runtime host may have different CPU features. `native` on a modern build
+# host emits AVX-512/BMI2 instructions that SIGILL on older runtime hosts.
+option(PORTABLE_BUILD "Build for x86-64-v2 baseline instead of -march=native" OFF)
+
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 
@@ -23,7 +29,19 @@ add_executable(engine
     src/uci.cpp
 )
 
-target_compile_options(engine PRIVATE -O3 -march=native -Wall -Wextra -funroll-loops)
+if(PORTABLE_BUILD)
+    set(ARCH_FLAGS -march=x86-64-v2 -mtune=generic)
+    message(STATUS "Portable build: ${ARCH_FLAGS}")
+else()
+    set(ARCH_FLAGS -march=native)
+    message(STATUS "Native build: ${ARCH_FLAGS}")
+endif()
+
+target_compile_options(engine PRIVATE
+    -O3
+    ${ARCH_FLAGS}
+    -Wall -Wextra -funroll-loops
+)
 
 target_include_directories(engine PRIVATE "${ORT_ROOT}/include")
 target_link_libraries(engine PRIVATE

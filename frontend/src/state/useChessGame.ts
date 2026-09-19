@@ -394,6 +394,13 @@ async function orchestrateStart(token: number, color: 'w' | 'b') {
   console.log('[gambit] start match:', color);
 
   let healthy = false;
+  try {
+    const h: any = await api.health();
+    healthy = h?.ok !== false;
+    console.log('[gambit] health body:', JSON.stringify(h).slice(0, 160));
+  } catch (e: any) {
+    console.log('[gambit] health request threw:', e?.message ?? e);
+  }
   try { healthy = (await api.health() as any).ok !== false; } catch { healthy = false; }
   console.log('[gambit] first health probe:', healthy, `${Date.now() - t0}ms`);
   if (!healthy) healthy = await waitForHealth(WAKE_BUDGET_MS, 2000);
