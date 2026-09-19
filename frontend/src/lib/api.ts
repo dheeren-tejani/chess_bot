@@ -1,13 +1,14 @@
 import type { GamePayload } from '../types';
 
-/* Same-origin everywhere:
-   - dev:  Vite's server.proxy forwards /api + /healthz to localhost:8000
-   - prod: the Netlify edge function forwards them to the deployed backend
-   The real backend URL exists ONLY in server-side env vars.
-   WARNING: never put it in a VITE_-prefixed variable — Vite inlines those
-   into the shipped JS bundle, which defeats the whole point. */
-const API_BASE: string = (globalThis as any).__GAMBIT_API__ ?? '';
-const API_TIMEOUT_MS = 4000;
+/* Same-origin everywhere (Vite dev proxy / Netlify edge function in prod).
+   The real backend URL exists ONLY in server-side env vars. */
+
+/* Engine searches legitimately take seconds, and a waking container holds
+   requests far longer. The old 1.5s health timeout aborted answers that
+   curl — which has no timeout — saw succeed. That was the "healthz not
+   properly going and coming" flicker. */
+const API_TIMEOUT_MS = 15000;
+const HEALTH_TIMEOUT_MS = 8000;
 
 export class ApiError extends Error {
   status?: number;
@@ -18,7 +19,7 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs: numbe
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(API_BASE + path, {
+    const res = await fetch(path, {
       ...init,
       signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
@@ -40,22 +41,22 @@ export const api = {
   loadGame(code: string): Promise<GamePayload> {
     return request('/api/games/' + encodeURIComponent(code), { method: 'GET' });
   },
-  health(): Promise<{ ok: boolean }> {
-    return request('/healthz', { method: 'GET' }, 1500);
+  /** Liveness probe — generous default timeout for waking containers. */
+  health(timeoutMs: number = HEALTH_TIMEOUT_MS): Promise<{ ok: boolean }> {
+    return request('/healthz', { method: 'GET' }, timeoutMs);
   },
 };
 
-/** Poll /healthz until the backend reports itself ready — used to ride
-    out a serverless cold start (each failed poll still nudges the wake).
-    NOTE: this backend serves 200 + {"ok": false} while the model loads,
-    so readiness is judged from the body, not the status code. */
+/** Poll /healthz until the backend reports ready. Attempts use a 12s
+    timeout. NOTE: this backend serves 200 + {"ok": false} while the
+    model loads, so readiness is judged from the body, not the status. */
 export async function waitForHealth(totalMs: number, intervalMs = 2000): Promise<boolean> {
   const deadline = Date.now() + totalMs;
   while (Date.now() < deadline) {
     try {
-      const h: any = await api.health();
-      if (!h || h.ok !== false) return true;   // ok:true, or unknown schema
-    } catch { /* not answering yet — keep polling */ }
+      const h: any = await api.health(12000);
+      if (!h || h.ok !== false) return true;
+    } catch { /* not answering (yet) — each failed poll still nudges the wake */ }
     await new Promise(r => setTimeout(r, intervalMs));
   }
   return false;

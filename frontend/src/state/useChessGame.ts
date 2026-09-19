@@ -391,22 +391,25 @@ const WAKE_BUDGET_MS = 120000;   // serverless cold-start budget
 
 async function orchestrateStart(token: number, color: 'w' | 'b') {
   const t0 = Date.now();
+  console.log('[gambit] start match:', color);
 
   let healthy = false;
   try { healthy = (await api.health() as any).ok !== false; } catch { healthy = false; }
-  if (!healthy) healthy = await waitForHealth(WAKE_BUDGET_MS, 1500);
+  console.log('[gambit] first health probe:', healthy, `${Date.now() - t0}ms`);
+  if (!healthy) healthy = await waitForHealth(WAKE_BUDGET_MS, 2000);
+  console.log('[gambit] health verdict:', healthy, `${Date.now() - t0}ms`);
   if (token !== loadSeq) return;
   if (useGame.getState().screen !== 'loading') return;
 
   if (!healthy) {
     useGame.setState({ loadingStage: 'offline', apiOnline: false });
-    return;                                    // loading screen offers local play / back
+    return;                                   // loading screen now offers Retry
   }
   useGame.setState({ apiOnline: true, loadingStage: 'ready' });
 
   if (color === 'b') {
     useGame.setState({ loadingStage: 'opening' });
-    await botTurn();                           // engine (White) opens during loading
+    await botTurn();                          // engine (White) opens during loading
     if (token !== loadSeq) return;
     if (useGame.getState().screen !== 'loading') return;
   }
@@ -415,6 +418,7 @@ async function orchestrateStart(token: number, color: 'w' | 'b') {
   if (remain > 0) await new Promise(r => setTimeout(r, remain));
   if (token !== loadSeq) return;
   if (useGame.getState().screen !== 'loading') return;
+  console.log('[gambit] entering game');
   useGame.setState({ screen: 'game' });
 }
 

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Check, X } from 'lucide-react';
 import { useGame } from '../state/useChessGame';
 import { PieceGlyph } from '../lib/glyphs';
+import { BUILD_ID } from '../lib/build';
 
 type RowState = 'pending' | 'active' | 'done' | 'error';
 
@@ -35,6 +36,7 @@ export function LoadingScreen() {
   const playLocally = useGame.getState().playLocally;
   const [t0, setT0] = useState(0);
   const [elapsed, setElapsed] = useState(0);
+  const startGame = useGame.getState().startGame;
 
   useEffect(() => {
     if (screen === 'loading') { setT0(performance.now()); setElapsed(0); }
@@ -70,6 +72,7 @@ export function LoadingScreen() {
               <div className="font-display text-lg font-semibold tracking-[0.42em] text-zinc-100">GAMBIT</div>
               <div className="mt-1 font-mono text-[10px] tracking-[0.28em] text-zinc-600">
                 PREPARING MATCH — YOU PLAY {isBlack ? 'BLACK' : 'WHITE'}
+                <div className="mt-0.5 font-mono text-[9px] tracking-[0.2em] text-zinc-700">BUILD {BUILD_ID}</div>
               </div>
             </div>
 
@@ -104,19 +107,23 @@ export function LoadingScreen() {
             {offline ? (
               <>
                 <p className="mt-4 text-center font-display text-[13px] leading-5 text-zinc-400">
-                  The engine server didn't respond in time — it may still be booting.
-                  You can retry from home, or play now with the built-in local engine.
+                  The engine server didn't respond in time. It may still be booting —
+                  retry, play with the built-in local engine, or go back.
                 </p>
                 <div className="mt-5 flex gap-2">
-                  <button onClick={playLocally}
+                  <button onClick={() => startGame(color)}
                     className="flex-1 rounded-xl bg-zinc-100 py-2.5 font-display text-sm text-zinc-950 transition hover:bg-white active:scale-[0.98]">
+                    Retry
+                  </button>
+                  <button onClick={playLocally}
+                    className="flex-1 rounded-xl border border-[#27272a] py-2.5 font-display text-sm text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100 active:scale-[0.98]">
                     Play locally
                   </button>
-                  <button onClick={goHome}
-                    className="flex-1 rounded-xl border border-[#27272a] py-2.5 font-display text-sm text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100 active:scale-[0.98]">
-                    Back to home
-                  </button>
                 </div>
+                <button onClick={goHome}
+                  className="mt-3 w-full text-center font-mono text-[10px] tracking-[0.2em] text-zinc-600 transition hover:text-zinc-300">
+                  BACK TO HOME
+                </button>
               </>
             ) : (
               <>

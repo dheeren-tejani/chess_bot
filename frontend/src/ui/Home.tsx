@@ -7,6 +7,7 @@ import { listLocalGames } from '../lib/storage';
 import type { LocalGameSummary } from '../lib/storage';
 import { PieceGlyph } from '../lib/glyphs';
 import { toast } from '../lib/toasts';
+import { BUILD_ID } from '../lib/build';
 
 export function Home() {
   const screen = useGame(s => s.screen);
@@ -123,7 +124,7 @@ export function Home() {
                   {status === 'online' ? 'ENGINE ONLINE — API' : status === 'offline' ? 'ENGINE LOCAL — BUILT-IN' : 'CONNECTING'}
                 </span>
               </div>
-              <span className="text-zinc-700">V — 2D/3D</span>
+              <span className="text-zinc-700">{BUILD_ID}V — 2D/3D</span>
             </div>
           </motion.div>
         </motion.div>
