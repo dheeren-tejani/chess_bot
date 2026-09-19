@@ -5,6 +5,7 @@ import { TopBar, ActionButtons, SidePanel, MobileBar, MobilePanel, Hint } from '
 import { Home } from './ui/Home';
 import { PromotionModal, ResignModal, GameOverModal, Toasts } from './ui/Modals';
 import { useGame } from './state/useChessGame';
+import { LoadingScreen } from './ui/Loading';
 
 function useKeyboard() {
   useEffect(() => {
@@ -74,6 +75,7 @@ export default function App() {
         </>
       )}
       <Home />
+      <LoadingScreen />
       <Toasts />
     </div>
   );

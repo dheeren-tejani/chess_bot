@@ -45,13 +45,18 @@ export const api = {
   },
 };
 
-/** Poll /healthz until the backend answers — used to ride out a
-    serverless cold start (each failed poll still nudges the wake-up). */
+/** Poll /healthz until the backend reports itself ready — used to ride
+    out a serverless cold start (each failed poll still nudges the wake).
+    NOTE: this backend serves 200 + {"ok": false} while the model loads,
+    so readiness is judged from the body, not the status code. */
 export async function waitForHealth(totalMs: number, intervalMs = 2000): Promise<boolean> {
   const deadline = Date.now() + totalMs;
   while (Date.now() < deadline) {
-    try { await api.health(); return true; }
-    catch { await new Promise(r => setTimeout(r, intervalMs)); }
+    try {
+      const h: any = await api.health();
+      if (!h || h.ok !== false) return true;   // ok:true, or unknown schema
+    } catch { /* not answering yet — keep polling */ }
+    await new Promise(r => setTimeout(r, intervalMs));
   }
   return false;
 }

@@ -16,3 +16,4 @@ orchestrator_state.json
 .vscode/
 frontend/node_modules/
 .env
+frontend/build/

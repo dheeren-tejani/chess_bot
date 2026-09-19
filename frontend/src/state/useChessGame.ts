@@ -12,6 +12,7 @@ const live = new Chess();     // authoritative game (live mode)
 const viewer = new Chess();   // replay position tracker (replay mode)
 let viewerPly = 0;            // ply currently loaded into `viewer`
 let reqSeq = 0;               // token to discard stale bot responses
+let loadSeq = 0;              // token to discard a cancelled match start
 const wideScreen = () => typeof window !== 'undefined' && window.innerWidth >= 1024;
 
 const clampCp = (v: number) => Math.max(-1500, Math.min(1500, Math.round(v) || 0));
@@ -51,7 +52,9 @@ function evalSeries(moves: VMove[], evals: Record<number, number>): number[] {
 }
 
 interface GameState {
-  screen: 'home' | 'game';
+  screen: 'home' | 'loading' | 'game';
+  loadingStage: 'waking' | 'ready' | 'opening' | 'offline';
+  loadingColor: 'w' | 'b';
   mode: 'live' | 'replay';
   viewMode: '3d' | '2d';
   playerColor: 'w' | 'b';
@@ -102,6 +105,7 @@ interface GameState {
   resetCamera: () => void;
   flipBoard: () => void;
   dismissGameOver: () => void;
+  playLocally: () => void;
 }
 
 const resetFields = () => ({
@@ -115,6 +119,8 @@ const resetFields = () => ({
 
 export const useGame = create<GameState>((set, get) => ({
   screen: 'home',
+  loadingStage: 'waking',
+  loadingColor: 'w',
   mode: 'live',
   viewMode: '3d',
   playerColor: 'w',
@@ -158,14 +164,28 @@ export const useGame = create<GameState>((set, get) => ({
   clearSelection: () => set({ selected: null, legalTargets: [], hovered: null }),
 
   startGame: (color) => {
-    reqSeq++;
+    reqSeq++;                        // kill any in-flight bot move from a previous game
+    const token = ++loadSeq;
     live.reset();
     set({
-      screen: 'game', mode: 'live', playerColor: color, orientation: color,
+      screen: 'loading',
+      loadingColor: color,
+      loadingStage: 'waking',
+      mode: 'live', playerColor: color, orientation: color,
       gameKey: get().gameKey + 1, ...resetFields(), panelOpen: wideScreen(),
       camCmd: { id: (get().camCmd?.id ?? 0) + 1, type: 'reset' },
     });
-    if (color === 'b') void botTurn(); // engine (White) opens the game
+    void orchestrateStart(token, color);
+  },
+
+  /** Continue from the offline state: play against the local engine. */
+  playLocally: () => {
+    const s = get();
+    if (s.screen !== 'loading' || s.loadingStage !== 'offline') return;
+    const color = s.loadingColor;
+    useGame.setState({ screen: 'game', apiOnline: false });
+    toast('Playing with the built-in local engine');
+    if (color === 'b') void botTurn();   // apiOnline=false → immediate local fallback, no health wait
   },
 
   resign: () => {
@@ -177,6 +197,7 @@ export const useGame = create<GameState>((set, get) => ({
 
   goHome: () => {
     reqSeq++;
+    loadSeq++;   // cancels any in-flight match-start orchestration
     live.reset();
     set({
       screen: 'home', mode: 'live', playerColor: 'w', orientation: 'w',
@@ -209,7 +230,7 @@ export const useGame = create<GameState>((set, get) => ({
       gameKey: get().gameKey + 1, ...resetFields(),
       moves: vlist, animDur: 0.5, panelOpen: wideScreen(),
       replayCode: c, replayResult: payload.result || null,
-      evalsByPly: evals, currentEval: evals[1] ?? 0,
+      evalsByPly: evals, currentEval: evals[0] ?? 0,
       camCmd: { id: (get().camCmd?.id ?? 0) + 1, type: 'reset' },
     });
   },
@@ -340,7 +361,7 @@ async function botTurn() {
     }
   }
   const st = useGame.getState();
-  if (token !== reqSeq || st.gameKey !== s0.gameKey || st.mode !== 'live' || st.screen !== 'game' || st.gameOver) {
+    if (token !== reqSeq || st.gameKey !== s0.gameKey || st.mode !== 'live' || st.screen === 'home' || st.gameOver) {
     useGame.setState({ thinking: false });
     return;
   }
@@ -360,6 +381,41 @@ async function botTurn() {
     });
   }
   if (v) pushMove(v, false);
+}
+
+/* Match-start orchestration: wake/verify the serverless backend, fetch
+   Black's opening move while the loading screen is up, then enter the
+   game. Every await re-checks the token so Cancel (goHome) discards it. */
+const MIN_LOADING_MS = 700;     // warm backends still get a readable transition
+const WAKE_BUDGET_MS = 30000;   // serverless cold-start budget
+
+async function orchestrateStart(token: number, color: 'w' | 'b') {
+  const t0 = Date.now();
+
+  let healthy = false;
+  try { healthy = (await api.health() as any).ok !== false; } catch { healthy = false; }
+  if (!healthy) healthy = await waitForHealth(WAKE_BUDGET_MS, 1500);
+  if (token !== loadSeq) return;
+  if (useGame.getState().screen !== 'loading') return;
+
+  if (!healthy) {
+    useGame.setState({ loadingStage: 'offline', apiOnline: false });
+    return;                                    // loading screen offers local play / back
+  }
+  useGame.setState({ apiOnline: true, loadingStage: 'ready' });
+
+  if (color === 'b') {
+    useGame.setState({ loadingStage: 'opening' });
+    await botTurn();                           // engine (White) opens during loading
+    if (token !== loadSeq) return;
+    if (useGame.getState().screen !== 'loading') return;
+  }
+
+  const remain = MIN_LOADING_MS - (Date.now() - t0);
+  if (remain > 0) await new Promise(r => setTimeout(r, remain));
+  if (token !== loadSeq) return;
+  if (useGame.getState().screen !== 'loading') return;
+  useGame.setState({ screen: 'game' });
 }
 
 async function finishGame(result: string, reason: string, winner: 'w' | 'b' | null) {
