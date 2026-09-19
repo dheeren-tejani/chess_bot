@@ -143,8 +143,8 @@ export const useGame = create<GameState>((set, get) => ({
       }
     }
     const pc = (live as any).get(sq);
-    if (pc && pc.color === live.turn()) {
-      set({ selected: sq, legalTargets: live.moves({ square: sq, verbose: true }) as unknown as VMove[], hovered: null });
+      if (pc && pc.color === live.turn()) {
+      set({ selected: sq, legalTargets: live.moves({ square: sq as any, verbose: true }) as unknown as VMove[], hovered: null });
       SFX.play('select');
     } else {
       set({ selected: null, legalTargets: [] });

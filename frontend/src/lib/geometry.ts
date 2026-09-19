@@ -184,46 +184,56 @@ export interface PartDef {
 let PARTS: Record<string, PartDef[]> | null = null;
 export function getParts(type: string): PartDef[] {
   if (!PARTS) {
-    const lathe = (pts: number[][], seg = 64) =>
+    // helpers typed as BufferGeometry so every part kind (lathe / box /
+    // cylinder / cone / sphere) unifies into PartDef.geo
+    const lathe = (pts: number[][], seg = 64): THREE.BufferGeometry =>
       new THREE.LatheGeometry(pts.map(p => new THREE.Vector2(p[0], p[1])), seg);
-    const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
-    const merlon = new THREE.CylinderGeometry(0.086, 0.105, 0.11, 4, 1);      // tapered, faceted
-    const eyeGeo = new THREE.SphereGeometry(0.016, 10, 8);
-    const spikeGeo = new THREE.ConeGeometry(0.046, SPIKE_H, 12);
-    const tipGeo = new THREE.SphereGeometry(0.027, 10, 8);
-    PARTS = {
+    const box = (w: number, h: number, d: number): THREE.BufferGeometry =>
+      new THREE.BoxGeometry(w, h, d);
+    const merlon: THREE.BufferGeometry = new THREE.CylinderGeometry(0.086, 0.105, 0.11, 4, 1);
+    const eyeGeo: THREE.BufferGeometry = new THREE.SphereGeometry(0.016, 10, 8);
+    const spikeGeo: THREE.BufferGeometry = new THREE.ConeGeometry(0.046, SPIKE_H, 12);
+    const tipGeo: THREE.BufferGeometry = new THREE.SphereGeometry(0.027, 10, 8);
+
+    const parts: Record<string, PartDef[]> = {
       p: [{ geo: lathe(PAWN_PROFILE) }],
       b: [{ geo: lathe(BISHOP_PROFILE) }],
-      r: [{ geo: lathe(ROOK_PROFILE) }].concat([0, 1, 2, 3].map(i => {
-        const a = (i * Math.PI) / 2;
-        return {
-          geo: merlon,
-          pos: [Math.cos(a) * 0.152, 0.795, Math.sin(a) * 0.152] as [number, number, number],
-          rot: [0, Math.PI / 4, 0] as [number, number, number],
-        };
-      })),
+      r: [
+        { geo: lathe(ROOK_PROFILE) },
+        ...[0, 1, 2, 3].map(i => {
+          const a = (i * Math.PI) / 2;
+          return {
+            geo: merlon,
+            pos: [Math.cos(a) * 0.152, 0.795, Math.sin(a) * 0.152] as [number, number, number],
+            rot: [0, Math.PI / 4, 0] as [number, number, number],
+          };
+        }),
+      ],
       n: [
         { geo: lathe(KNIGHT_BASE_PROFILE) },
         { geo: knightHeadGeo(), pos: [0, 0.262, 0] },
         { geo: eyeGeo, pos: [0.07, 0.782, 0.097], mat: 'eye' as const },
         { geo: eyeGeo, pos: [0.07, 0.782, -0.097], mat: 'eye' as const },
       ],
-      q: [{ geo: lathe(QUEEN_PROFILE) }]
-        .concat(Array.from({ length: 8 }, (_, i) => {
+      q: [
+        { geo: lathe(QUEEN_PROFILE) },
+        ...Array.from({ length: 8 }, (_, i) => {
           const a = (i * Math.PI) / 4;
           return { geo: spikeGeo, pos: spikePos(a, SPIKE_H / 2), rot: coronetTilt(a, SPIKE_T) };
-        }))
-        .concat(Array.from({ length: 8 }, (_, i) => {
+        }),
+        ...Array.from({ length: 8 }, (_, i) => {
           const a = (i * Math.PI) / 4;
           return { geo: tipGeo, pos: spikePos(a, SPIKE_H) };
-        })),
+        }),
+      ],
       k: [
         { geo: lathe(KING_PROFILE) },
-        { geo: new THREE.SphereGeometry(0.034, 12, 10), pos: [0, 1.02, 0] },  // collar ball
-        { geo: box(0.052, 0.20, 0.052), pos: [0, 1.11, 0] },                  // cross vertical
-        { geo: box(0.16, 0.052, 0.052), pos: [0, 1.142, 0] },                 // cross arm
+        { geo: new THREE.SphereGeometry(0.034, 12, 10), pos: [0, 1.02, 0] },
+        { geo: box(0.052, 0.20, 0.052), pos: [0, 1.11, 0] },
+        { geo: box(0.16, 0.052, 0.052), pos: [0, 1.142, 0] },
       ],
     };
+    PARTS = parts;
   }
   return PARTS[type] ?? PARTS.p;
 }

@@ -5,20 +5,22 @@ class SoundFX {
   private noise: AudioBuffer | null = null;
   muted = false;
 
-  private ensure(): AudioContext | null {
-    if (!this.ctx) {
+    private ensure(): AudioContext | null {
+    let ctx = this.ctx;
+    if (!ctx) {
       const AC = (window as any).AudioContext || (window as any).webkitAudioContext;
       if (!AC) return null;
-      this.ctx = new AC();
-      const sr = this.ctx.sampleRate;
+      ctx = new AC() as AudioContext;
+      this.ctx = ctx;
+      const sr = ctx.sampleRate;
       const len = Math.floor(sr * 0.3);
-      const buf = this.ctx.createBuffer(1, len, sr);
+      const buf = ctx.createBuffer(1, len, sr);
       const d = buf.getChannelData(0);
       for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
       this.noise = buf;
     }
-    if (this.ctx.state === 'suspended') void this.ctx.resume();
-    return this.ctx;
+    if (ctx.state === 'suspended') void ctx.resume();
+    return ctx;
   }
   private env(t0: number, peak: number, dur: number) {
     const g = this.ctx!.createGain();
