@@ -5,6 +5,7 @@
 #include <optional>
 #include <stdexcept>
 #include <sstream>
+#include <cstdlib>
 
 namespace chess {
 
@@ -30,7 +31,13 @@ bool NNEvaluator::load(const std::string& onnx_path, int batch_size, bool prefer
         batch_size_ = batch_size;
 
         Ort::SessionOptions so;
-        so.SetIntraOpNumThreads(prefer_gpu ? 1 : 2);
+        int intra_threads = 8;
+        if (const char* e = std::getenv("CHESS_ORT_THREADS")) {
+            intra_threads = std::max(1, std::atoi(e));
+        }
+        so.SetIntraOpNumThreads(prefer_gpu ? 1 : intra_threads);
+        fprintf(stderr, "[nn_client] ORT intra-op threads = %d (gpu=%d)\n",
+                prefer_gpu ? 1 : intra_threads, (int)prefer_gpu);
         so.SetInterOpNumThreads(1);
         so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 

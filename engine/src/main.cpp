@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
                 "  match --model-a A --model-b B [--games N] [--visits V] [--batch B]\n"
                 "        [--threads T] [--games-per-worker G] [--pgn FILE] [--cpu]\n"
                 "  bench --model M [--seconds S] [--batch B] [--cpu]\n"
-                "  uci --model M [--visits N] [--cpu]\n");
+                "  uci --model M [--visits N] [--workers W] [--batch B] [--cpu]\n");
         return 2;
     }
 
@@ -190,6 +190,8 @@ int main(int argc, char** argv) {
     if (!strcmp(argv[1], "uci")) {
         std::string model;
         int visits = 800;
+        int workers = 32;   // root-parallel MCTS tree count
+        int batch   = 32;   // ONNX batch size; keep <= workers
         bool cpu = false;
         for (int i = 2; i < argc; ++i) {
             std::string k = argv[i];
@@ -197,10 +199,12 @@ int main(int argc, char** argv) {
             auto nexts = [&]() { return std::string(argv[++i]); };
             if (k == "--model") model = nexts();
             else if (k == "--visits") visits = nexti();
+            else if (k == "--workers") workers = nexti();
+            else if (k == "--batch")   batch   = nexti();
             else if (k == "--cpu") cpu = true;
         }
         if (model.empty()) { fprintf(stderr, "--model required\n"); return 2; }
-        return run_uci(model, visits, !cpu);
+        return run_uci(model, visits, !cpu, workers, batch);
     }
 
     fprintf(stderr, "unknown command %s\n", argv[1]);

@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cassert>
 #include <cctype>
+#include <cstdlib>
 
 namespace chess {
 namespace attacks {
@@ -54,6 +55,12 @@ void init() {
     __builtin_cpu_init();
     BMI2 = __builtin_cpu_supports("bmi2");
 #endif
+
+    if (!BMI2) {
+        INITED = true;
+        return;
+    }
+
     for (int sq = 0; sq < 64; ++sq) {
         int f = file_of(sq), r = rank_of(sq);
         uint64_t& wp = PAWN_ATT[WHITE][sq];

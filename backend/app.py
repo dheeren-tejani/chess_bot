@@ -32,6 +32,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import chess
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,7 +47,7 @@ sys.path.insert(0, str(REPO_ROOT))
 ENGINE_BIN = os.environ.get(
     "CHESS_ENGINE_BIN", str(REPO_ROOT / "engine" / "build" / "engine"))
 MODEL_PATH = os.environ.get("CHESS_MODEL_PATH", "models/champion.onnx")
-VISITS = int(os.environ.get("CHESS_VISITS", "2048"))
+VISITS = int(os.environ.get("CHESS_VISITS", "4096"))
 MOVETIME_MS = int(os.environ.get("CHESS_MOVETIME_MS", "0"))   # 0 => use visits
 PREFER_GPU = os.environ.get("CHESS_DEVICE", "auto").lower() != "cpu"
 ENGINE_TIMEOUT_S = float(os.environ.get("CHESS_ENGINE_TIMEOUT_S", "60"))
@@ -300,6 +303,7 @@ class GamePayloadIn(BaseModel):
     moves: list[str]
     result: Optional[str] = None
     evaluations: Optional[list[float]] = None
+    player_color: Optional[str] = None
     started_at: Optional[int] = None
     duration_ms: Optional[int] = None
     move_times_ms: Optional[list[int]] = None
@@ -467,6 +471,7 @@ def save_game(payload: GamePayloadIn):
         winner=winner,
         ply_count=len(payload.moves),
         evaluations=payload.evaluations,
+        player_color=(payload.player_color or "white").lower(),
         final_eval=(payload.evaluations[-1] if payload.evaluations else None),
         final_fen=final_board.fen(),
         started_at=payload.started_at,

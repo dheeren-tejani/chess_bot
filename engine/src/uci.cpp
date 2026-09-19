@@ -53,30 +53,42 @@ int cp_from_q(float q) {   // [-1,1] -> centipawns (logistic, like most MCTS eng
 
 class UciPlayer {
 public:
-    static constexpr int NUM_WORKERS = 32;
-    static constexpr int BATCH_SIZE  = 32;   // keep == NUM_WORKERS
+    bool load(const std::string& model, bool prefer_gpu,
+              int num_workers, int batch_size) {
+        // Root-parallel invariant: batch_size must be <= num_workers.
+        // If it's larger, the batcher waits for tasks that never arrive and
+        // every round pays the full fill window. Clamp and warn.
+        if (batch_size > num_workers) {
+            std::cerr << "info string warning: batch_size (" << batch_size
+                      << ") > num_workers (" << num_workers
+                      << "); clamping batch_size to num_workers\n";
+            batch_size = num_workers;
+        }
+        if (num_workers < 1 || batch_size < 1) {
+            std::cerr << "info string error: num_workers and batch_size must be >= 1\n";
+            return false;
+        }
+        num_workers_ = num_workers;
+        batch_size_  = batch_size;
 
-    bool load(const std::string& model, bool prefer_gpu) {
         std::string err;
-        if (!nn_.load(model, BATCH_SIZE, prefer_gpu, &err)) {
+        if (!nn_.load(model, batch_size_, prefer_gpu, &err)) {
             std::cout << "info string model load failed: " << err << std::endl;
             return false;
         }
         std::cout << "info string model loaded (gpu="
                   << (nn_.is_gpu() ? "yes" : "no")
-                  << ", batch=" << BATCH_SIZE
-                  << ", workers=" << NUM_WORKERS << ")\n";
+                  << ", batch=" << batch_size_
+                  << ", workers=" << num_workers_ << ")\n";
 
         cfg_.root_dirichlet = false;
         cfg_.temperature_plies = 0;
         cfg_.prior_plies = 0;
         cfg_.use_twofold_draw = true;
 
-        // contempt=0.5, value_material_alpha=0 -> identical value math to the
-        // original synchronous UCI eval().
-        batcher_ = std::make_unique<EvalBatcher>(nn_, BATCH_SIZE, 0.0f, 0.5f);
-        batcher_->set_mailboxes(NUM_WORKERS);
-        batcher_->start();   // persistent across `go` commands
+        batcher_ = std::make_unique<EvalBatcher>(nn_, batch_size_, 0.0f, 0.5f);
+        batcher_->set_mailboxes(num_workers_);
+        batcher_->start();
         return true;
     }
 
@@ -104,16 +116,16 @@ public:
         // K independent searches of the same root, each producing one leaf
         // per round; the EvalBatcher aggregates across all K into real batches.
         std::vector<std::unique_ptr<Search>> searches;
-        searches.reserve(NUM_WORKERS);
-        for (int i = 0; i < NUM_WORKERS; ++i)
+        searches.reserve(num_workers_);
+        for (int i = 0; i < num_workers_; ++i)
             searches.push_back(std::make_unique<Search>(
                 cfg_, std::vector<Position>(hist), &rng_));
 
         std::atomic<int> total_visits{0};
         std::vector<std::thread> workers;
-        workers.reserve(NUM_WORKERS);
+        workers.reserve(num_workers_);
 
-        for (int i = 0; i < NUM_WORKERS; ++i) {
+        for (int i = 0; i < num_workers_; ++i) {
             workers.emplace_back([&, i] {
                 Search& s = *searches[i];
                 std::vector<EvalTask> ts;
@@ -227,12 +239,15 @@ private:
     MCTSConfig cfg_;
     std::unique_ptr<EvalBatcher> batcher_;
     std::mt19937_64 rng_{0x5EED1234};
+    int num_workers_ = 32;
+    int batch_size_  = 32;
 };
 
-int run_uci(const std::string& model_path, int default_visits, bool prefer_gpu) {
+int run_uci(const std::string& model_path, int default_visits, bool prefer_gpu,
+            int num_workers, int batch_size) {
     attacks::init();
     UciPlayer player;
-    if (!player.load(model_path, prefer_gpu)) return 1;
+    if (!player.load(model_path, prefer_gpu, num_workers, batch_size)) return 1;
 
     std::vector<Position> hist(1);
     hist[0].set_from_fen(START_FEN);
